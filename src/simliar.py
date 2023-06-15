@@ -15,6 +15,7 @@ API_KEY = read_api_key()
 
 SIMILAR_TEMP_THRESHOLD = 2  # temperature difference to consider as 'similar', in Celsius
 
+
 def get_temperature(location, date):
     url = f"http://api.weatherapi.com/v1/history.json?key={API_KEY}&q={location}&dt={date}"
     response = requests.get(url)
@@ -22,7 +23,7 @@ def get_temperature(location, date):
 
     if 'forecast' not in data:
         print(f"No weather data available for {location} on {date}")
-        return None
+        return None, None, None
 
     avg_temp = data['forecast']['forecastday'][0]['day']['avgtemp_c']
     max_temp = data['forecast']['forecastday'][0]['day']['maxtemp_c']
@@ -47,6 +48,7 @@ def find_similar_days(location, date, debug=False):
         check_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         avg_temp, max_temp, min_temp = get_temperature(location, check_date)
 
+        # Skip the day if weather data is unavailable
         if avg_temp is None:
             continue
 
@@ -67,7 +69,7 @@ def find_similar_days(location, date, debug=False):
 if __name__ == "__main__":
     location = "London"
     date = "2023-06-14"
-    debug_mode = True  # Set debug mode to True or False as per your requirement
+    debug_mode = False  # Set debug mode to True or False as per your requirement
     similar_days = find_similar_days(location, date, debug=debug_mode)
 
     if debug_mode:
