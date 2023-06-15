@@ -16,21 +16,36 @@ API_KEY = read_api_key()
 SIMILAR_TEMP_THRESHOLD = 2  # temperature difference to consider as 'similar', in Celsius
 
 def get_temperature(location, date, debug=False):
-    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/weatherdata/history?location={location}&date={date}&key={API_KEY}&unitGroup=metric"
-    response = requests.get(url)
-    data = response.json()
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/{date}/{date}?unitGroup=metric&key={API_KEY}&contentType=json"
+    
+    if debug:
+        curl_command = f"curl -X GET '{url}'"
+        print("Curl command:", curl_command)
 
-    if 'locations' not in data or location not in data['locations']:
+    response = requests.get(url)
+    
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        print(f"Error retrieving weather data for {location} on {date}: {e}")
+        return None, None, None
+    
+    try:
+        data = response.json()
+    except ValueError as e:
+        print(f"Error decoding JSON response for {location} on {date}: {e}")
+        print("Response content:", response.content)
+        return None, None, None
+
+    if 'days' not in data or len(data['days']) == 0:
         print(f"No weather data available for {location} on {date}")
         if debug:
             print("Complete response:", data)
-            print(f"\nTo replicate this request, run the following curl command:\n"
-                  f"curl -X GET '{url}'\n")
         return None, None, None
 
-    avg_temp = data['locations'][location]['values'][0]['temp']
-    max_temp = data['locations'][location]['values'][0]['maxt']
-    min_temp = data['locations'][location]['values'][0]['mint']
+    avg_temp = data['days'][0]['temp']
+    max_temp = data['days'][0].get('maxt')
+    min_temp = data['days'][0].get('mint')
 
     return avg_temp, max_temp, min_temp
 
@@ -79,3 +94,4 @@ if __name__ == "__main__":
     else:
         print(f"Similar days in terms of temperature for {location} on {date} in the last 5 years are:")
     for day in similar_days:
+        print(day)
