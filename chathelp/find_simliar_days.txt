@@ -1,0 +1,1 @@
+I am using the weatherapi.com API.  Can  you please generate a python script that will accept a location description, along with a date, and will make calls into the weatherapi finding similar days based on hi/low/average temperature for the last 5 years?  Please add as global constants parameters that can be used to set the idea of "similar" to be applied to these values.
