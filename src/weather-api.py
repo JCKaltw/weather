@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 def read_api_key():
     try:
-        with open('apikey/apikey', 'r') as file:
+        with open('apikey/weatherapi-apikey', 'r') as file:
             api_key = file.read().strip()
         return api_key
     except IOError:
@@ -15,14 +15,17 @@ API_KEY = read_api_key()
 
 SIMILAR_TEMP_THRESHOLD = 2  # temperature difference to consider as 'similar', in Celsius
 
-
-def get_temperature(location, date):
+def get_temperature(location, date, debug=False):
     url = f"http://api.weatherapi.com/v1/history.json?key={API_KEY}&q={location}&dt={date}"
     response = requests.get(url)
     data = response.json()
 
     if 'forecast' not in data:
         print(f"No weather data available for {location} on {date}")
+        if debug:
+            print("Complete response:", data)
+            print(f"\nTo replicate this request, run the following curl command:\n"
+                  f"curl -X GET '{url}'\n")
         return None, None, None
 
     avg_temp = data['forecast']['forecastday'][0]['day']['avgtemp_c']
@@ -32,23 +35,22 @@ def get_temperature(location, date):
     return avg_temp, max_temp, min_temp
 
 def find_similar_days(location, date, debug=False):
-    target_avg_temp, target_max_temp, target_min_temp = get_temperature(location, date)
-    
+    target_avg_temp, target_max_temp, target_min_temp = get_temperature(location, date, debug)
+
     if target_avg_temp is None:
         return []
 
     similar_days = []
     if debug:
-        window_size = 30  # Consider the last 30 days in debug mode
+        window_size = 30
     else:
-        window_size = 365 * 5  # Consider the last 5 years if not in debug mode
+        window_size = 365 * 5
 
     today = datetime.strptime(date, "%Y-%m-%d")
     for i in range(1, window_size + 1):
         check_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-        avg_temp, max_temp, min_temp = get_temperature(location, check_date)
+        avg_temp, max_temp, min_temp = get_temperature(location, check_date, debug)
 
-        # Skip the day if weather data is unavailable
         if avg_temp is None:
             continue
 
@@ -69,7 +71,7 @@ def find_similar_days(location, date, debug=False):
 if __name__ == "__main__":
     location = "London"
     date = "2023-06-14"
-    debug_mode = False  # Set debug mode to True or False as per your requirement
+    debug_mode = True  # Set debug mode to True or False as per your requirement
     similar_days = find_similar_days(location, date, debug=debug_mode)
 
     if debug_mode:
