@@ -1,5 +1,13 @@
 import requests
 from datetime import datetime, timedelta
+import json
+import logging
+import argparse
+
+CURL_COMMANDS = []
+
+# Set up logging
+logging.basicConfig(filename='visual-crossing.log', level=logging.INFO)
 
 def read_api_key():
     try:
@@ -15,79 +23,110 @@ API_KEY = read_api_key()
 
 SIMILAR_TEMP_THRESHOLD = 2  # temperature difference to consider as 'similar', in Celsius
 
-def get_temperature(location, date, debug=False):
-    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/{date}/{date}?unitGroup=metric&key={API_KEY}&contentType=json"
+def get_temperature_range(location, start_date, end_date, args, debug=False):
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/{start_date}/{end_date}?unitGroup=metric&key={API_KEY}&contentType=json"
     
-    if debug:
+    if args.dry_run or debug:
         curl_command = f"curl -X GET '{url}'"
-        print("Curl command:", curl_command)
+        CURL_COMMANDS.append(curl_command)
+        if args.dry_run:
+            return
 
     response = requests.get(url)
     
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        print(f"Error retrieving weather data for {location} on {date}: {e}")
-        return None, None, None
+        print(f"Error retrieving weather data for {location} from {start_date} to {end_date}: {e}")
+        return None
     
     try:
         data = response.json()
+        # Log the response data
+        logging.info(f"Response data for {location} from {start_date} to {end_date}: {json.dumps(data)}")
     except ValueError as e:
-        print(f"Error decoding JSON response for {location} on {date}: {e}")
+        print(f"Error decoding JSON response for {location} from {start_date} to {end_date}: {e}")
         print("Response content:", response.content)
-        return None, None, None
+        return None
 
     if 'days' not in data or len(data['days']) == 0:
-        print(f"No weather data available for {location} on {date}")
+        print(f"No weather data available for {location} from {start_date} to {end_date}")
         if debug:
             print("Complete response:", data)
-        return None, None, None
+        return None
 
-    avg_temp = data['days'][0]['temp']
-    max_temp = data['days'][0].get('maxt')
-    min_temp = data['days'][0].get('mint')
+    return data['days']
 
-    return avg_temp, max_temp, min_temp
 
-def find_similar_days(location, date, debug=False):
-    target_avg_temp, target_max_temp, target_min_temp = get_temperature(location, date, debug)
+def find_similar_days(location, date, args, debug=False):
+    # Fetch the target day's weather data
+    target_day_data = get_temperature_range(location, date, date, args, debug)
 
-    if target_avg_temp is None:
+    if target_day_data is None or len(target_day_data) == 0:
         return []
+
+    target_avg_temp = target_day_data[0]['temp']
+    target_max_temp = target_day_data[0].get('tempmax')
+    target_min_temp = target_day_data[0].get('tempmin')
+
+    # Log if avg, max or min temperature is missing for the target day
+    if target_max_temp is None:
+        logging.info(f"Expected field 'tempmax' was missing in the response data for {location} on {date}. Adjusting computations to ignore maximum temperature.")
+    if target_min_temp is None:
+        logging.info(f"Expected field 'tempmin' was missing in the response data for {location} on {date}. Adjusting computations to ignore minimum temperature.")
+    if target_avg_temp is None:
+        logging.info(f"Expected field 'temp' was missing in the response data for {location} on {date}. Adjusting computations to ignore average temperature.")
 
     similar_days = []
     if debug:
-        window_size = 30
+        years_back = 2
+        window_size = 15
     else:
-        window_size = 365 * 5
+        years_back = 5
+        window_size = 50
 
     today = datetime.strptime(date, "%Y-%m-%d")
-    for i in range(1, window_size + 1):
-        check_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-        avg_temp, max_temp, min_temp = get_temperature(location, check_date, debug)
+    for year in range(years_back):
+        start_date = (today - timedelta(days=window_size/2 + 365*year)).strftime("%Y-%m-%d")
+        end_date = (today + timedelta(days=window_size/2 - 365*year)).strftime("%Y-%m-%d")
+        days_data = get_temperature_range(location, start_date, end_date, args, debug)
 
-        if avg_temp is None:
+        if days_data is None:
             continue
 
-        if (abs(target_avg_temp - avg_temp) <= SIMILAR_TEMP_THRESHOLD and
-            abs(target_max_temp - max_temp) <= SIMILAR_TEMP_THRESHOLD and
-            abs(target_min_temp - min_temp) <= SIMILAR_TEMP_THRESHOLD):
-            similar_days.append(check_date)
+        for day_data in days_data:
+            avg_temp = day_data['temp']
+            max_temp = day_data.get('tempmax')
+            min_temp = day_data.get('tempmin')
 
-        if debug:
-            print(f"Comparing {date} with {check_date}:")
-            print(f"Target Average Temp: {target_avg_temp}°C, Check Average Temp: {avg_temp}°C")
-            print(f"Target Max Temp: {target_max_temp}°C, Check Max Temp: {max_temp}°C")
-            print(f"Target Min Temp: {target_min_temp}°C, Check Min Temp: {min_temp}°C")
-            print("--------")
+            if (avg_temp is not None and abs(target_avg_temp - avg_temp) <= SIMILAR_TEMP_THRESHOLD and
+                max_temp is not None and abs(target_max_temp - max_temp) <= SIMILAR_TEMP_THRESHOLD and
+                min_temp is not None and abs(target_min_temp - min_temp) <= SIMILAR_TEMP_THRESHOLD):
+                similar_days.append(day_data['datetime'])
+
+            if debug:
+                print(f"Comparing {date} with {day_data['datetime']}:")
+                print(f"Target Average Temp: {target_avg_temp}°C, Check Average Temp: {avg_temp}°C")
+                print(f"Target Max Temp: {target_max_temp}°C, Check Max Temp: {max_temp}°C")
+                print(f"Target Min Temp: {target_min_temp}°C, Check Min Temp: {min_temp}°C")
+                print("--------")
 
     return similar_days
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--dry-run", help="Perform a dry run, display the cURL command and exit.", action="store_true")
+    args = parser.parse_args()
+
     location = "London"
     date = "2023-06-14"
     debug_mode = True  # Set debug mode to True or False as per your requirement
-    similar_days = find_similar_days(location, date, debug=debug_mode)
+    similar_days = find_similar_days(location, date, args, debug=debug_mode)
+
+    if args.dry_run:
+        print("Dry run mode active. Displaying cURL commands:")
+        for command in CURL_COMMANDS:
+            print(command)
 
     if debug_mode:
         print(f"Similar days in terms of temperature for {location} on {date} in the last month are:")
@@ -95,3 +134,4 @@ if __name__ == "__main__":
         print(f"Similar days in terms of temperature for {location} on {date} in the last 5 years are:")
     for day in similar_days:
         print(day)
+
