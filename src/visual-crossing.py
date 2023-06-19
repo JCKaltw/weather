@@ -33,7 +33,14 @@ def get_temperature_range(location, start_date, end_date, args, debug=False):
             return
 
     response = requests.get(url)
-    
+
+    if response.status_code != 200 or response.headers['Content-Type'] != 'application/json':
+        print(f"Error retrieving weather data for {location} from {start_date} to {end_date}")
+        print("Response status code:", response.status_code)
+        print("Response content type:", response.headers['Content-Type'])
+        print("Response content:", response.content)
+        exit(1)  # terminate the script with error status
+
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
