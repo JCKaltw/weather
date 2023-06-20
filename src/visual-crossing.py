@@ -7,7 +7,7 @@ import argparse
 CURL_COMMANDS = []
 
 # Set up logging
-logging.basicConfig(filename='visual-crossing.log', level=logging.INFO)
+logging.basicConfig(filename='visual-crossing.log', level=logging.INFO, format='%(asctime)s:%(levelname)s:%(message)s')
 
 def read_api_key():
     try:
@@ -46,11 +46,10 @@ def get_temperature_range(location, start_date, end_date, args, debug=False):
     except requests.exceptions.HTTPError as e:
         print(f"Error retrieving weather data for {location} from {start_date} to {end_date}: {e}")
         return None
-    
+
     try:
         data = response.json()
-        # Log the response data
-        logging.info(f"Response data for {location} from {start_date} to {end_date}: {json.dumps(data)}")
+        logging.info(f"Response data for {location} from {start_date} to {end_date}: \n{json.dumps(data, indent=4, sort_keys=True)}")
     except ValueError as e:
         print(f"Error decoding JSON response for {location} from {start_date} to {end_date}: {e}")
         print("Response content:", response.content)
@@ -59,24 +58,19 @@ def get_temperature_range(location, start_date, end_date, args, debug=False):
     if 'days' not in data or len(data['days']) == 0:
         print(f"No weather data available for {location} from {start_date} to {end_date}")
         if debug:
-            print("Complete response:", data)
+            print("Complete response:", json.dumps(data, indent=4, sort_keys=True))
         return None
 
     return data['days']
 
-
 def find_similar_days(location, date, args, debug=False):
-    # Fetch the target day's weather data
     target_day_data = get_temperature_range(location, date, date, args, debug)
-
     if target_day_data is None or len(target_day_data) == 0:
         return []
-
     target_avg_temp = target_day_data[0]['temp']
     target_max_temp = target_day_data[0].get('tempmax')
     target_min_temp = target_day_data[0].get('tempmin')
 
-    # Log if avg, max or min temperature is missing for the target day
     if target_max_temp is None:
         logging.info(f"Expected field 'tempmax' was missing in the response data for {location} on {date}. Adjusting computations to ignore maximum temperature.")
     if target_min_temp is None:
@@ -85,17 +79,19 @@ def find_similar_days(location, date, args, debug=False):
         logging.info(f"Expected field 'temp' was missing in the response data for {location} on {date}. Adjusting computations to ignore average temperature.")
 
     similar_days = []
-    if debug:
-        years_back = 2
-        window_size = 15
-    else:
-        years_back = 5
-        window_size = 50
+    years_back = 2 if debug else 5
+    window_size = 15 if debug else 50
 
     today = datetime.strptime(date, "%Y-%m-%d")
-    for year in range(years_back):
-        start_date = (today - timedelta(days=window_size/2 + 365*year)).strftime("%Y-%m-%d")
-        end_date = (today + timedelta(days=window_size/2 - 365*year)).strftime("%Y-%m-%d")
+    for year in range(years_back + 1):  # +1 to include current year
+        if year == 0:
+            start_date = (today - timedelta(days=window_size)).strftime("%Y-%m-%d")
+            end_date = date
+        else:
+            date_previous_year = today.replace(year=today.year - year)
+            start_date = (date_previous_year - timedelta(days=window_size/2)).strftime("%Y-%m-%d")
+            end_date = (date_previous_year + timedelta(days=window_size/2)).strftime("%Y-%m-%d")
+        
         days_data = get_temperature_range(location, start_date, end_date, args, debug)
 
         if days_data is None:
@@ -136,7 +132,7 @@ if __name__ == "__main__":
             print(command)
 
     if debug_mode:
-        print(f"Similar days in terms of temperature for {location} on {date} in the last month are:")
+        print(f"Similar days in terms of temperature for {location} on {date} in the last 2 years are:")
     else:
         print(f"Similar days in terms of temperature for {location} on {date} in the last 5 years are:")
     for day in similar_days:
