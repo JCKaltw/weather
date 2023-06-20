@@ -85,7 +85,7 @@ def find_similar_days(location, date, args, debug=False):
     today = datetime.strptime(date, "%Y-%m-%d")
     for year in range(years_back + 1):  # +1 to include current year
         if year == 0:
-            start_date = (today - timedelta(days=window_size)).strftime("%Y-%m-%d")
+            start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
             end_date = date
         else:
             date_previous_year = today.replace(year=today.year - year)
