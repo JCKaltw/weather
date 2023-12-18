@@ -2,6 +2,8 @@ import argparse
 import requests
 import psycopg2
 import os
+import json
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from psycopg2 import IntegrityError
 
@@ -38,10 +40,18 @@ def insert_weather_data(db_conn, address, weather_data):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--start-date", required=True)
-    parser.add_argument("--end-date", required=True)
+    parser.add_argument("--start-date")
+    parser.add_argument("--end-date")
     parser.add_argument("--address", required=True)
+    parser.add_argument("--debug", action='store_true')
     args = parser.parse_args()
+
+    # Set start and end dates to yesterday if not provided
+    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    if not args.start_date:
+        args.start_date = yesterday
+    if not args.end_date:
+        args.end_date = yesterday
 
     api_key = read_api_key()
     if not api_key:
@@ -49,15 +59,18 @@ def main():
 
     weather_data = fetch_weather_data(args.address, args.start_date, args.end_date, api_key)
 
-    db_conn = psycopg2.connect(
-        host=os.environ['PGHOST_2'],
-        user=os.environ['PGUSER_2'],
-        dbname=os.environ['PGDATABASE_2'],
-        port=os.environ['PGPORT_2']
-    )
+    if args.debug:
+        print(json.dumps({'Request': {'address': args.address, 'start_date': args.start_date, 'end_date': args.end_date}, 'Response': weather_data}, indent=4))
+    else:
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
 
-    insert_weather_data(db_conn, args.address, weather_data)
-    db_conn.close()
+        insert_weather_data(db_conn, args.address, weather_data)
+        db_conn.close()
 
 if __name__ == "__main__":
     main()
