@@ -3,7 +3,7 @@ import requests
 import psycopg2
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from psycopg2 import IntegrityError
 
@@ -38,16 +38,24 @@ def insert_weather_data(db_conn, address, weather_data):
             else:
                 db_conn.commit()
 
+def calculate_yesterday(tz_offset=None):
+    if tz_offset is None:
+        return (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    else:
+        tz_delta = timedelta(hours=tz_offset)
+        return (datetime.now(timezone.utc) + tz_delta - timedelta(1)).strftime('%Y-%m-%d')
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--address", required=True)
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--tzoffset", type=int, help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ)")
     args = parser.parse_args()
 
-    # Set start and end dates to yesterday if not provided
-    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    # Calculate yesterday's date based on the time zone offset
+    yesterday = calculate_yesterday(args.tzoffset)
     if not args.start_date:
         args.start_date = yesterday
     if not args.end_date:
