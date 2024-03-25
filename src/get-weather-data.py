@@ -24,14 +24,18 @@ def fetch_weather_data(address, start_date, end_date, api_key):
     response = requests.get(url)
     return response.json()
 
-def insert_weather_data(db_conn, address, weather_data):
-    with db_conn.cursor() as cur:
-        for day in weather_data['days']:
+def insert_weather_data(db_conn, address, weather_data, dry_run=False):
+    for day in weather_data['days']:
+        sql = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s);"
+        params = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
+
+        if dry_run:
+            print("Dry run mode: SQL query that would be executed:")
+            print(sql % params)
+        else:
             try:
-                cur.execute(
-                    "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s);",
-                    (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
-                )
+                with db_conn.cursor() as cur:
+                    cur.execute(sql, params)
             except IntegrityError as e:
                 print(f"Duplicate entry for {day['datetime']} at {address}. Skipping.")
                 db_conn.rollback()  # Rollback the current transaction for retry
@@ -51,6 +55,7 @@ def main():
     parser.add_argument("--end-date")
     parser.add_argument("--address", required=True)
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--dry-run", action='store_true', help="Perform a dry run that only shows the request and response in JSON format and the SQL queries")
     parser.add_argument("--tzoffset", type=int, help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ)")
     args = parser.parse_args()
 
@@ -67,7 +72,18 @@ def main():
 
     weather_data = fetch_weather_data(args.address, args.start_date, args.end_date, api_key)
 
-    if args.debug:
+    if args.dry_run:
+        print(json.dumps({
+            'Request': {
+                'address': args.address,
+                'start_date': args.start_date,
+                'end_date': args.end_date,
+                'api_key': 'XXXXX'  # API key masked
+            },
+            'Response': weather_data
+        }, indent=4))
+        insert_weather_data(None, args.address, weather_data, dry_run=True)
+    elif args.debug:
         print(json.dumps({'Request': {'address': args.address, 'start_date': args.start_date, 'end_date': args.end_date}, 'Response': weather_data}, indent=4))
     else:
         db_conn = psycopg2.connect(
