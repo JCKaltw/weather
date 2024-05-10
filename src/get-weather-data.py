@@ -11,7 +11,7 @@ def read_api_key():
     try:
         with open('apikey/visual-crossing-apikey', 'r') as file:
             api_key = file.read().strip()
-        return api_key
+            return api_key
     except IOError:
         print("Error reading the API key file.")
         return None
@@ -20,25 +20,32 @@ def fetch_weather_data(address, start_date, end_date, api_key):
     encoded_address = quote(address)
     encoded_start_date = quote(start_date)
     encoded_end_date = quote(end_date)
-    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include=days&key={api_key}&contentType=json"
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include=days,hours&key={api_key}&contentType=json"
     response = requests.get(url)
     return response.json()
 
 def insert_weather_data(db_conn, address, weather_data, dry_run=False):
     for day in weather_data['days']:
-        sql = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s);"
-        params = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
+        sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
+        params_daily = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
 
         if dry_run:
             print("Dry run mode: SQL query that would be executed:")
-            print(sql % params)
+            print(sql_daily % params_daily)
         else:
             try:
                 with db_conn.cursor() as cur:
-                    cur.execute(sql, params)
+                    cur.execute(sql_daily, params_daily)
+                    weather_data_id = cur.fetchone()[0]
+
+                    for hour in day['hours']:
+                        sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
+                        params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour['tempmin'], hour['tempmax'])
+                        cur.execute(sql_hourly, params_hourly)
+
             except IntegrityError as e:
                 print(f"Duplicate entry for {day['datetime']} at {address}. Skipping.")
-                db_conn.rollback()  # Rollback the current transaction for retry
+                db_conn.rollback()
             else:
                 db_conn.commit()
 
@@ -61,6 +68,7 @@ def main():
 
     # Calculate yesterday's date based on the time zone offset
     yesterday = calculate_yesterday(args.tzoffset)
+
     if not args.start_date:
         args.start_date = yesterday
     if not args.end_date:
@@ -92,7 +100,6 @@ def main():
             dbname=os.environ['PGDATABASE_2'],
             port=os.environ['PGPORT_2']
         )
-
         insert_weather_data(db_conn, args.address, weather_data)
         db_conn.close()
 
