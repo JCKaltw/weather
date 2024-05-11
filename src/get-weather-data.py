@@ -16,15 +16,26 @@ def read_api_key():
         print("Error reading the API key file.")
         return None
 
-def fetch_weather_data(address, start_date, end_date, api_key):
+def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=False):
     encoded_address = quote(address)
     encoded_start_date = quote(start_date)
     encoded_end_date = quote(end_date)
-    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include=days,hours&key={api_key}&contentType=json"
-    response = requests.get(url)
-    return response.json()
+    include_param = "days,hours" if include_hourly else "days"
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error occurred while fetching weather data: {e}")
+        return None
+    except requests.exceptions.JSONDecodeError as e:
+        print(f"Error decoding JSON response: {e}")
+        print("Response content:", response.text)
+        return None
 
-def insert_weather_data(db_conn, address, weather_data, dry_run=False):
+def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
     for day in weather_data['days']:
         sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
         params_daily = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
@@ -38,10 +49,11 @@ def insert_weather_data(db_conn, address, weather_data, dry_run=False):
                     cur.execute(sql_daily, params_daily)
                     weather_data_id = cur.fetchone()[0]
 
-                    for hour in day['hours']:
-                        sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
-                        params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour['tempmin'], hour['tempmax'])
-                        cur.execute(sql_hourly, params_hourly)
+                    if include_hourly:
+                        for hour in day['hours']:
+                            sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
+                            params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour['tempmin'], hour['tempmax'])
+                            cur.execute(sql_hourly, params_hourly)
 
             except IntegrityError as e:
                 print(f"Duplicate entry for {day['datetime']} at {address}. Skipping.")
@@ -64,6 +76,7 @@ def main():
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--dry-run", action='store_true', help="Perform a dry run that only shows the request and response in JSON format and the SQL queries")
     parser.add_argument("--tzoffset", type=int, help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ)")
+    parser.add_argument("--hourly", action='store_true', help="Fetch and insert hourly weather data")
     args = parser.parse_args()
 
     # Calculate yesterday's date based on the time zone offset
@@ -78,7 +91,11 @@ def main():
     if not api_key:
         return
 
-    weather_data = fetch_weather_data(args.address, args.start_date, args.end_date, api_key)
+    weather_data = fetch_weather_data(args.address, args.start_date, args.end_date, api_key, include_hourly=args.hourly)
+
+    if weather_data is None:
+        print("Failed to fetch weather data. Please check the API key and try again.")
+        return
 
     if args.dry_run:
         print(json.dumps({
@@ -90,7 +107,7 @@ def main():
             },
             'Response': weather_data
         }, indent=4))
-        insert_weather_data(None, args.address, weather_data, dry_run=True)
+        insert_weather_data(None, args.address, weather_data, include_hourly=args.hourly, dry_run=True)
     elif args.debug:
         print(json.dumps({'Request': {'address': args.address, 'start_date': args.start_date, 'end_date': args.end_date}, 'Response': weather_data}, indent=4))
     else:
@@ -100,7 +117,7 @@ def main():
             dbname=os.environ['PGDATABASE_2'],
             port=os.environ['PGPORT_2']
         )
-        insert_weather_data(db_conn, args.address, weather_data)
+        insert_weather_data(db_conn, args.address, weather_data, include_hourly=args.hourly)
         db_conn.close()
 
 if __name__ == "__main__":
