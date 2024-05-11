@@ -20,7 +20,7 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
     encoded_address = quote(address)
     encoded_start_date = quote(start_date)
     encoded_end_date = quote(end_date)
-    include_param = "days,hours,obs" if include_hourly else "days"
+    include_param = "days,hours" if include_hourly else "days"
     url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
     
     try:
@@ -49,10 +49,10 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                     cur.execute(sql_daily, params_daily)
                     weather_data_id = cur.fetchone()[0]
 
-                    if include_hourly:
+                    if include_hourly and 'hours' in day:
                         for hour in day['hours']:
                             sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
-                            params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour['tempmin'], hour['tempmax'])
+                            params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None))
                             cur.execute(sql_hourly, params_hourly)
 
             except IntegrityError as e:
