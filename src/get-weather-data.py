@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from psycopg2 import IntegrityError
+from psycopg2 import extras
 
 def read_api_key():
     try:
@@ -74,32 +75,52 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
             print("Response content:", response.text)
             return None
 
-def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
-    for day in weather_data['days']:
-        sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
-        params_daily = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
 
-        if dry_run:
-            print("Dry run mode: SQL query that would be executed:")
-            print(sql_daily % params_daily)
-        else:
-            try:
-                with db_conn.cursor() as cur:
-                    cur.execute(sql_daily, params_daily)
-                    weather_data_id = cur.fetchone()[0]
-
-                    if include_hourly and 'hours' in day:
-                        for hour in day['hours']:
-                            timestamp = f"{day['datetime']} {hour['datetime']}"  # Combine date and time
-                            sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
-                            params_hourly = (weather_data_id, timestamp, hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None))
-                            cur.execute(sql_hourly, params_hourly)
-
-            except IntegrityError as e:
-                print(f"Duplicate entry for {day['datetime']} at {address}. Skipping.")
-                db_conn.rollback()
+def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False, block_size=100):
+    with db_conn.cursor() as cur:
+        for i in range(0, len(weather_data['days']), block_size):
+            block = weather_data['days'][i:i+block_size]
+            
+            daily_data = []
+            hourly_data = []
+            
+            for day in block:
+                daily_data.append((day['datetime'], address, day['temp'], day['tempmin'], day['tempmax']))
+                
+                if include_hourly and 'hours' in day:
+                    for hour in day['hours']:
+                        timestamp = f"{day['datetime']} {hour['datetime']}"
+                        hourly_data.append((day['datetime'], timestamp, hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None)))
+            
+            if not dry_run:
+                try:
+                    sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES %s ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
+                    psycopg2.extras.execute_values(cur, sql_daily, daily_data, page_size=block_size)
+                    
+                    if include_hourly and hourly_data:
+                        weather_data_ids = [row[0] for row in cur.fetchall()]
+                        hourly_data = [(weather_data_id,) + row[1:] for weather_data_id, row in zip(weather_data_ids, hourly_data)]
+                        
+                        sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES %s ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
+                        psycopg2.extras.execute_values(cur, sql_hourly, hourly_data, page_size=block_size)
+                    
+                    db_conn.commit()
+                except IntegrityError as e:
+                    print(f"Duplicate entry for {day['datetime']} at {address}. Skipping.")
+                    db_conn.rollback()
             else:
-                db_conn.commit()
+                print("Dry run mode: SQL queries that would be executed:")
+                print(sql_daily)
+                print(daily_data)
+                
+                if include_hourly and hourly_data:
+                    print(sql_hourly)
+                    print(hourly_data)
+
+
+
+
+
 
 def calculate_yesterday(tz_offset=None):
     if tz_offset is None:
