@@ -74,14 +74,6 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
             print("Response content:", response.text)
             return None
 
-
-
-
-
-
-
-
-
 def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
     for day in weather_data['days']:
         sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
@@ -98,8 +90,9 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
 
                     if include_hourly and 'hours' in day:
                         for hour in day['hours']:
+                            timestamp = f"{day['datetime']} {hour['datetime']}"  # Combine date and time
                             sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
-                            params_hourly = (weather_data_id, hour['datetime'], hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None))
+                            params_hourly = (weather_data_id, timestamp, hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None))
                             cur.execute(sql_hourly, params_hourly)
 
             except IntegrityError as e:
