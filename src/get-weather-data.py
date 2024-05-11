@@ -18,22 +18,49 @@ def read_api_key():
 
 def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=False):
     encoded_address = quote(address)
-    encoded_start_date = quote(start_date)
-    encoded_end_date = quote(end_date)
     include_param = "days,hours" if include_hourly else "days"
-    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
     
-    try:
-        response = requests.get(url)
-        response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error occurred while fetching weather data: {e}")
-        return None
-    except requests.exceptions.JSONDecodeError as e:
-        print(f"Error decoding JSON response: {e}")
-        print("Response content:", response.text)
-        return None
+    if include_hourly:
+        # Split the date range into smaller intervals
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+        delta = end_date_obj - start_date_obj
+        
+        weather_data = []
+        for i in range(delta.days + 1):
+            request_date = start_date_obj + timedelta(days=i)
+            request_date_str = request_date.strftime("%Y-%m-%d")
+            url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{request_date_str}/{request_date_str}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
+            
+            try:
+                response = requests.get(url)
+                response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
+                weather_data.extend(response.json()['days'])
+            except requests.exceptions.RequestException as e:
+                print(f"Error occurred while fetching weather data: {e}")
+                return None
+            except requests.exceptions.JSONDecodeError as e:
+                print(f"Error decoding JSON response: {e}")
+                print("Response content:", response.text)
+                return None
+        
+        return {'days': weather_data}
+    else:
+        encoded_start_date = quote(start_date)
+        encoded_end_date = quote(end_date)
+        url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
+        
+        try:
+            response = requests.get(url)
+            response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error occurred while fetching weather data: {e}")
+            return None
+        except requests.exceptions.JSONDecodeError as e:
+            print(f"Error decoding JSON response: {e}")
+            print("Response content:", response.text)
+            return None
 
 def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
     for day in weather_data['days']:
