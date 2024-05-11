@@ -20,7 +20,7 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
     encoded_address = quote(address)
     encoded_start_date = quote(start_date)
     encoded_end_date = quote(end_date)
-    include_param = "days,hours" if include_hourly else "days"
+    include_param = "days,hours,obs" if include_hourly else "days"
     url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{encoded_address}/{encoded_start_date}/{encoded_end_date}?unitGroup=us&include={include_param}&key={api_key}&contentType=json"
     
     try:
