@@ -95,7 +95,7 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                 if include_hourly and 'hours' in day:
                     for hour in day['hours']:
                         timestamp = f"{day['datetime']} {hour['datetime']}"
-                        hourly_data.append((day['datetime'], timestamp, hour['temp'], hour.get(
+                        hourly_data.append((timestamp, hour['temp'], hour.get(
                             'tempmin', None), hour.get('tempmax', None)))
 
             if not dry_run:
@@ -106,12 +106,12 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
 
                     if include_hourly and hourly_data:
                         weather_data_ids = [row[0] for row in cur.fetchall()]
-                        hourly_data = [(weather_data_id,) + row[1:]
-                                       for weather_data_id, row in zip(weather_data_ids, hourly_data)]
+                        hourly_data_with_ids = [(weather_data_id, *row)
+                                                for weather_data_id, row in zip(weather_data_ids, hourly_data)]
 
                         sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES %s ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
                         psycopg2.extras.execute_values(
-                            cur, sql_hourly, hourly_data, page_size=block_size)
+                            cur, sql_hourly, hourly_data_with_ids, page_size=block_size)
 
                     db_conn.commit()
                 except IntegrityError as e:
@@ -126,7 +126,6 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                 if include_hourly and hourly_data:
                     print(sql_hourly)
                     print(hourly_data)
-
 
 def calculate_yesterday(tz_offset=None):
     if tz_offset is None:
