@@ -91,8 +91,8 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                     if include_hourly and 'hours' in day:
                         for hour in day['hours']:
                             timestamp = f"{day['datetime']} {hour['datetime']}"  # Combine date and time
-                            sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
-                            params_hourly = (weather_data_id, timestamp, hour['temp'], hour.get('tempmin', None), hour.get('tempmax', None))
+                            sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp) VALUES (%s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp;"
+                            params_hourly = (weather_data_id, timestamp, hour['temp'])
                             cur.execute(sql_hourly, params_hourly)
 
             except IntegrityError as e:
@@ -100,6 +100,7 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                 db_conn.rollback()
             else:
                 db_conn.commit()
+
 
 def calculate_yesterday(tz_offset=None):
     if tz_offset is None:

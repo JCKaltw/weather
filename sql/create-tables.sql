@@ -13,13 +13,11 @@ CREATE TABLE IF NOT EXISTS weather.weather_data (
 );
 
 -- Create the weather.hourly_data table
-CREATE TABLE IF NOT EXISTS weather.hourly_data (
+CREATE TABLE weather.hourly_data (
     id SERIAL PRIMARY KEY,
     weather_data_id INTEGER,
     hour TIMESTAMP,
-    temp NUMERIC,
-    tempmin NUMERIC,
-    tempmax NUMERIC,
+    temp NUMERIC(5, 2),
     FOREIGN KEY (weather_data_id) REFERENCES weather.weather_data(id),
     UNIQUE (weather_data_id, hour)
 );
