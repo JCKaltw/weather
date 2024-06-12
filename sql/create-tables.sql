@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS weather.weather_data (
     temp DECIMAL(5,2),
     tempmin DECIMAL(5,2),
     tempmax DECIMAL(5,2),
+    tz VARCHAR,
     UNIQUE (date, address)
 );
 
