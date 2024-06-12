@@ -18,7 +18,7 @@ def read_api_key():
 
 def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=False):
     encoded_address = quote(address)
-    include_param = "days,hours" if include_hourly else "days"
+    include_param = "days,hours,timezone" if include_hourly else "days,timezone"
     
     if include_hourly:
         # Split the date range into smaller intervals
@@ -52,7 +52,7 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
                 return None
         
         print("Hourly weather data fetched successfully")
-        return {'days': weather_data}
+        return {'days': weather_data, 'timezone': response.json()['timezone']}
     else:
         encoded_start_date = quote(start_date)
         encoded_end_date = quote(end_date)
@@ -75,9 +75,10 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
             return None
 
 def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
+    timezone = weather_data['timezone']
     for day in weather_data['days']:
-        sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
-        params_daily = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'])
+        sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax, tz) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax, tz = EXCLUDED.tz RETURNING id;"
+        params_daily = (day['datetime'], address, day['temp'], day['tempmin'], day['tempmax'], timezone)
 
         if dry_run:
             print("Dry run mode: SQL query that would be executed:")
@@ -128,18 +129,18 @@ def get_missing_hours(db_conn, address, api_key, dry_run=False):
                 print(f"Hourly data for {date_str} inserted/updated successfully.")
             else:
                 print(f"Dry run mode: Simulating fetch and insert/update for {date_str}...")
-                print(f"API request: fetch_weather_data(address='{address}', start_date='{date_str}', end_date='{date_str}', api_key='XXXXX', include_hourly=True)")
+                print(f"API request: fetch_weather_data(address='{address}', start_date='{date_str}', end_date='{date_str}', api_key=<read_from_file>, include_hourly=True)")
                 print("SQL queries that would be executed:")
                 
-                sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax RETURNING id;"
+                sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax, tz) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax, tz = EXCLUDED.tz RETURNING id;"
                 print(sql_daily)
                 
-                sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp, tempmin, tempmax) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax;"
+                sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp) VALUES (%s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp;"
                 print(sql_hourly)
                 
                 print("Data that would be inserted/updated:")
-                print(f"Daily data: (date='{date_str}', address='{address}', temp=<temp>, tempmin=<tempmin>, tempmax=<tempmax>)")
-                print(f"Hourly data: (weather_data_id=<weather_data_id>, hour=<hour>, temp=<temp>, tempmin=<tempmin>, tempmax=<tempmax>)")
+                print(f"Daily data: (date='{date_str}', address='{address}', temp=<temp>, tempmin=<tempmin>, tempmax=<tempmax>, tz=<timezone>)")
+                print(f"Hourly data: (weather_data_id=<weather_data_id>, hour=<hour>, temp=<temp>)")
                 print("---")
 
 def main():
@@ -191,8 +192,7 @@ def main():
                 'Request': {
                     'address': args.address,
                     'start_date': args.start_date,
-                    'end_date': args.end_date,
-                    'api_key': 'XXXXX'  # API key masked
+                    'end_date': args.end_date
                 },
                 'Response': weather_data
             }, indent=4))
