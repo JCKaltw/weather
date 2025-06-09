@@ -206,6 +206,8 @@ def main():
                         help="Fetch and insert hourly weather data")
     parser.add_argument("--get-missing-hours", action='store_true',
                         help="Fetch and update missing hourly data for the specified address")
+    parser.add_argument("--get-missing-tz", action='store_true',
+                        help="Fetch and populate missing tz values for the specified address")
     args = parser.parse_args()
 
     # Calculate yesterday's date based on the time zone offset
@@ -275,7 +277,6 @@ def main():
             insert_weather_data(db_conn, args.address,
                                 weather_data, include_hourly=args.hourly)
             db_conn.close()
-
 
 if __name__ == "__main__":
     main()
