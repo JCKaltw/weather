@@ -4,7 +4,7 @@ CREATE SCHEMA IF NOT EXISTS weather;
 -- Create the weather.weather_data table
 CREATE TABLE IF NOT EXISTS weather.weather_data (
     id SERIAL PRIMARY KEY,
-    date DATE NOT NULL,
+    date DATE NOT NULL,             -- local timezone (tz)
     address VARCHAR(255) NOT NULL,
     temp DECIMAL(5,2),
     tempmin DECIMAL(5,2),
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS weather.weather_data (
 CREATE TABLE weather.hourly_data (
     id SERIAL PRIMARY KEY,
     weather_data_id INTEGER,
-    hour TIMESTAMP,
+    hour TIMESTAMP,                     -- local timezone
     temp NUMERIC(5, 2),
     FOREIGN KEY (weather_data_id) REFERENCES weather.weather_data(id),
     UNIQUE (weather_data_id, hour)
