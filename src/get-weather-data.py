@@ -176,6 +176,147 @@ def get_all_locations(db_conn):
     return locations
 
 
+def get_all_display_group_ids(db_conn):
+    """
+    Retrieve all display group IDs from the display_group table.
+    Returns a list of display group ID integers.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT display_group_id FROM display_group ORDER BY display_group_id")
+        display_group_ids = [row[0] for row in cur.fetchall()]
+    return display_group_ids
+
+
+def check_missing_hours_for_display_group(db_conn, display_group_id):
+    """
+    Check if a specific display group has missing hourly weather data.
+    Returns True if missing hours are found, False otherwise.
+    
+    Uses similar logic to update_for_display_group_id but only checks without fetching/inserting.
+    """
+    with db_conn.cursor() as cur:
+        # Get display group parameters
+        cur.execute("""
+            SELECT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
+            FROM display_group 
+            WHERE display_group_id = %s
+        """, (display_group_id,))
+        
+        row = cur.fetchone()
+        if row is None:
+            return False  # Display group not found
+        
+        test_start_date, test_end_date, day_start_seconds, tz_name, weather_address = row
+        
+        if not weather_address:
+            return False  # No weather address configured
+        
+        # Parse timezone
+        try:
+            local_tz = pytz.timezone(tz_name)
+        except pytz.exceptions.UnknownTimeZoneError:
+            return False  # Invalid timezone
+        
+        # Compute start time: test_start_date + day_start_seconds in local timezone
+        start_datetime = datetime.combine(test_start_date, datetime.min.time())
+        start_datetime += timedelta(seconds=day_start_seconds)
+        start_datetime_local = local_tz.localize(start_datetime)
+        
+        # Compute end time
+        if test_end_date:
+            # Use test_end_date + day_start_seconds
+            end_datetime = datetime.combine(test_end_date, datetime.min.time())
+            end_datetime += timedelta(seconds=day_start_seconds)
+            end_datetime_local = local_tz.localize(end_datetime)
+        else:
+            # Use current time minus 1 hour (last completed hour)
+            now_local = datetime.now(local_tz)
+            # Round down to the last completed hour
+            end_datetime_local = now_local.replace(minute=0, second=0, microsecond=0)
+        
+        # Check for missing daily data first
+        current_date = start_datetime_local.date()
+        end_date = end_datetime_local.date()
+        
+        while current_date <= end_date:
+            cur.execute("""
+                SELECT COUNT(*) FROM weather.weather_data 
+                WHERE address = %s AND date = %s
+            """, (weather_address, current_date))
+            
+            count = cur.fetchone()[0]
+            if count == 0:
+                return True  # Missing daily data
+            
+            current_date += timedelta(days=1)
+        
+        # Check for missing hourly data in the specified time range
+        cur.execute("""
+            SELECT w.id, w.date 
+            FROM weather.weather_data w
+            WHERE w.address = %s 
+            AND w.date >= %s 
+            AND w.date <= %s
+            ORDER BY w.date
+        """, (weather_address, start_datetime_local.date(), end_datetime_local.date()))
+        
+        weather_data_records = cur.fetchall()
+        
+        for weather_data_id, date in weather_data_records:
+            # Generate expected hours for this date within our time range
+            date_start = datetime.combine(date, datetime.min.time())
+            date_start_local = local_tz.localize(date_start)
+            
+            # Find the overlap between this date and our target range
+            day_start = max(date_start_local, start_datetime_local)
+            day_end = min(date_start_local + timedelta(days=1), end_datetime_local + timedelta(hours=1))
+            
+            if day_start >= day_end:
+                continue  # No overlap
+            
+            # Generate expected hours
+            current_hour = day_start.replace(minute=0, second=0, microsecond=0)
+            while current_hour < day_end:
+                # Check if this hour exists in hourly_data
+                # Convert timezone-aware datetime to naive for database comparison
+                naive_hour = current_hour.replace(tzinfo=None)
+                cur.execute("""
+                    SELECT COUNT(*) FROM weather.hourly_data 
+                    WHERE weather_data_id = %s AND hour = %s
+                """, (weather_data_id, naive_hour))
+                
+                count = cur.fetchone()[0]
+                if count == 0:
+                    return True  # Found missing hourly data
+                
+                current_hour += timedelta(hours=1)
+        
+        return False  # No missing hours found
+
+
+def list_display_group_ids_missing_hours(db_conn):
+    """
+    Scan all display group IDs and identify those with missing hourly weather data.
+    Returns a list of display group IDs that have missing hours.
+    """
+    # Get all display group IDs
+    display_group_ids = get_all_display_group_ids(db_conn)
+    missing_hours_group_ids = []
+    
+    print(f"Scanning {len(display_group_ids)} display groups for missing hourly weather data...")
+    
+    for i, display_group_id in enumerate(display_group_ids, 1):
+        print(f"[{i}/{len(display_group_ids)}] Checking display group {display_group_id}...")
+        
+        if check_missing_hours_for_display_group(db_conn, display_group_id):
+            missing_hours_group_ids.append(display_group_id)
+            print(f"  -> Display group {display_group_id} has missing hours")
+        else:
+            print(f"  -> Display group {display_group_id} is complete")
+    
+    return missing_hours_group_ids
+
+
 def process_all_locations(api_key, include_hourly=False, dry_run=False):
     """
     Process weather data for all locations in the weather_location table.
@@ -500,10 +641,42 @@ def main():
                         help="Run weather data collection for all locations in the weather_location table, fetching the previous 24 hours of data using UTC-based date calculation")
     parser.add_argument("--update-for-display-group-id", type=int,
                         help="Update missing hourly weather data for a specific display group ID")
+    parser.add_argument("--list-display-group-ids-missing-hours", action='store_true',
+                        help="Scan all display group IDs and list those with missing hourly weather data")
     args = parser.parse_args()
 
     api_key = read_api_key()
     if not api_key:
+        return
+
+    # Handle the new --list-display-group-ids-missing-hours option
+    if args.list_display_group_ids_missing_hours:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id:
+            print("Error: --list-display-group-ids-missing-hours cannot be used with other options.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            missing_group_ids = list_display_group_ids_missing_hours(db_conn)
+            
+            print(f"\nSummary:")
+            print(f"Display groups with missing hourly weather data: {len(missing_group_ids)}")
+            
+            if missing_group_ids:
+                print("Display group IDs missing hours:")
+                for group_id in missing_group_ids:
+                    print(f"  {group_id}")
+            else:
+                print("All display groups have complete hourly weather data.")
+                
+        finally:
+            db_conn.close()
         return
 
     # Handle the new --run-for-all-locations option
@@ -534,7 +707,7 @@ def main():
 
     # Existing functionality - require address for all other operations
     if not args.address:
-        print("Error: --address is required when not using --run-for-all-locations or --update-for-display-group-id.")
+        print("Error: --address is required when not using --run-for-all-locations, --update-for-display-group-id, or --list-display-group-ids-missing-hours.")
         return
 
     # Calculate yesterday's date based on the time zone offset
