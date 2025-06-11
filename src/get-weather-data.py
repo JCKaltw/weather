@@ -433,10 +433,12 @@ def update_for_display_group_id(db_conn, display_group_id, api_key, dry_run=Fals
             current_hour = day_start.replace(minute=0, second=0, microsecond=0)
             while current_hour < day_end:
                 # Check if this hour exists in hourly_data
+                # Convert timezone-aware datetime to naive for database comparison
+                naive_hour = current_hour.replace(tzinfo=None)
                 cur.execute("""
                     SELECT COUNT(*) FROM weather.hourly_data 
                     WHERE weather_data_id = %s AND hour = %s
-                """, (weather_data_id, current_hour))
+                """, (weather_data_id, naive_hour))
                 
                 count = cur.fetchone()[0]
                 if count == 0:
