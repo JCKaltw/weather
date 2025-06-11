@@ -106,9 +106,12 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
 
                     if include_hourly and 'hours' in day:
                         for hour in day['hours']:
-                            # Combine date and time
-                            # Note: This timestamp represents local time in the location's timezone
-                            # The timezone is stored separately in the weather_data.tz column
+                            # CRITICAL: Visual Crossing API returns hourly data in LOCAL TIME
+                            # - day['datetime'] = "2025-06-11" (date in local timezone)  
+                            # - hour['datetime'] = "14:00:00" (time in local timezone)
+                            # - Combined: "2025-06-11 14:00:00" = LOCAL TIME for this location
+                            # - The timezone is stored separately in weather_data.tz column
+                            # This ensures proper alignment with device data in the same local timezone
                             timestamp = f"{day['datetime']} {hour['datetime']}"
                             sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp) VALUES (%s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp;"
                             params_hourly = (
