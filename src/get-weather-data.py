@@ -211,6 +211,9 @@ def check_missing_hours_for_display_group(db_conn, display_group_id):
         if not weather_address:
             return False  # No weather address configured
         
+        if not test_start_date:
+            return False  # No test start date configured
+        
         # Parse timezone
         try:
             local_tz = pytz.timezone(tz_name)
