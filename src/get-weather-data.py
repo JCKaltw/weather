@@ -1,3 +1,12 @@
+# /home/chris/projects/weather/src/get-weather-data.py
+#
+# TIMEZONE HANDLING STRATEGY:
+# - Date calculations use UTC time for consistency across all locations
+# - Visual Crossing API interprets date parameters in each location's local timezone
+# - Daily data: stored as YYYY-MM-DD dates + timezone string in 'tz' column  
+# - Hourly data: stored as local timestamps (YYYY-MM-DD HH:MM:SS) in location's timezone
+# - To interpret hourly data, always reference the corresponding weather_data.tz value
+
 import argparse
 import requests
 import psycopg2
@@ -98,6 +107,8 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
                     if include_hourly and 'hours' in day:
                         for hour in day['hours']:
                             # Combine date and time
+                            # Note: This timestamp represents local time in the location's timezone
+                            # The timezone is stored separately in the weather_data.tz column
                             timestamp = f"{day['datetime']} {hour['datetime']}"
                             sql_hourly = "INSERT INTO weather.hourly_data (weather_data_id, hour, temp) VALUES (%s, %s, %s) ON CONFLICT (weather_data_id, hour) DO UPDATE SET temp = EXCLUDED.temp;"
                             params_hourly = (
@@ -113,11 +124,105 @@ def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dr
 
 
 def calculate_yesterday(tz_offset=None):
+    """
+    Legacy function for calculating yesterday's date.
+    Used by single-location operations for backward compatibility.
+    
+    For --run-for-all-locations, use calculate_previous_24_hours() instead
+    which provides consistent UTC-based date calculation.
+    """
     if tz_offset is None:
         return (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
     else:
         tz_delta = timedelta(hours=tz_offset)
         return (datetime.now(timezone.utc) + tz_delta - timedelta(1)).strftime('%Y-%m-%d')
+
+
+def calculate_previous_24_hours():
+    """
+    Calculate the date range for the previous 24 hours starting from the last completed hour.
+    Uses UTC time to ensure consistency across all locations.
+    Returns a tuple of (start_date, end_date) in YYYY-MM-DD format.
+    
+    Note: The Visual Crossing API will interpret these dates in each location's 
+    local timezone, which is the desired behavior.
+    """
+    # Use UTC time for consistency across all locations
+    now_utc = datetime.now(timezone.utc)
+    # Go back to the last completed hour (truncate minutes and seconds)
+    last_completed_hour_utc = now_utc.replace(minute=0, second=0, microsecond=0)
+    # Calculate 24 hours before that
+    start_time_utc = last_completed_hour_utc - timedelta(hours=24)
+    
+    # Convert to date strings
+    start_date = start_time_utc.strftime('%Y-%m-%d')
+    end_date = last_completed_hour_utc.strftime('%Y-%m-%d')
+    
+    return start_date, end_date
+
+
+def get_all_locations(db_conn):
+    """
+    Retrieve all addresses from the weather.weather_location table.
+    Returns a list of address strings.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT address FROM weather.weather_location ORDER BY address")
+        locations = [row[0] for row in cur.fetchall()]
+    return locations
+
+
+def process_all_locations(api_key, include_hourly=False, dry_run=False):
+    """
+    Process weather data for all locations in the weather_location table.
+    Fetches data for the previous 24 hours for each location.
+    
+    Timezone handling:
+    - Calculates date range using UTC for consistency
+    - API interprets dates in each location's local timezone
+    - This ensures each location gets its local "previous 24 hours"
+    """
+    # Connect to database
+    db_conn = psycopg2.connect(
+        host=os.environ['PGHOST_2'],
+        user=os.environ['PGUSER_2'],
+        dbname=os.environ['PGDATABASE_2'],
+        port=os.environ['PGPORT_2']
+    )
+    
+    try:
+        # Get all locations from database
+        locations = get_all_locations(db_conn)
+        print(f"Found {len(locations)} locations to process")
+        
+        # Calculate date range for previous 24 hours
+        start_date, end_date = calculate_previous_24_hours()
+        print(f"Processing data for date range: {start_date} to {end_date}")
+        
+        # Process each location
+        for i, address in enumerate(locations, 1):
+            print(f"\n[{i}/{len(locations)}] Processing location: {address}")
+            
+            # Fetch weather data for this location
+            weather_data = fetch_weather_data(
+                address, start_date, end_date, api_key, include_hourly=include_hourly)
+            
+            if weather_data is None:
+                print(f"Failed to fetch weather data for {address}. Skipping.")
+                continue
+            
+            # Insert/update weather data
+            if dry_run:
+                print(f"Dry run mode: Would insert/update data for {address}")
+                insert_weather_data(None, address, weather_data, 
+                                  include_hourly=include_hourly, dry_run=True)
+            else:
+                insert_weather_data(db_conn, address, weather_data, 
+                                  include_hourly=include_hourly, dry_run=False)
+                print(f"Weather data for {address} processed successfully.")
+                
+    finally:
+        db_conn.close()
 
 
 def get_missing_hours(db_conn, address, api_key, dry_run=False):
@@ -196,19 +301,40 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
-    parser.add_argument("--address", required=True)
+    parser.add_argument("--address")
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--dry-run", action='store_true',
                         help="Perform a dry run that only shows the request and response in JSON format and the SQL queries")
     parser.add_argument("--tzoffset", type=int,
-                        help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ)")
+                        help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ) - used only for single location operations")
     parser.add_argument("--hourly", action='store_true',
                         help="Fetch and insert hourly weather data")
     parser.add_argument("--get-missing-hours", action='store_true',
                         help="Fetch and update missing hourly data for the specified address")
     parser.add_argument("--get-missing-tz", action='store_true',
                         help="Fetch and populate missing tz values for the specified address")
+    parser.add_argument("--run-for-all-locations", action='store_true',
+                        help="Run weather data collection for all locations in the weather_location table, fetching the previous 24 hours of data using UTC-based date calculation")
     args = parser.parse_args()
+
+    api_key = read_api_key()
+    if not api_key:
+        return
+
+    # Handle the new --run-for-all-locations option
+    if args.run_for_all_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz:
+            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, or --get-missing-tz options.")
+            return
+        
+        print("Running weather data collection for all locations...")
+        process_all_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run)
+        return
+
+    # Existing functionality - require address for all other operations
+    if not args.address:
+        print("Error: --address is required when not using --run-for-all-locations.")
+        return
 
     # Calculate yesterday's date based on the time zone offset
     yesterday = calculate_yesterday(args.tzoffset)
@@ -217,10 +343,6 @@ def main():
         args.start_date = yesterday
     if not args.end_date:
         args.end_date = yesterday
-
-    api_key = read_api_key()
-    if not api_key:
-        return
 
     if args.get_missing_tz:
         db_conn = psycopg2.connect(
