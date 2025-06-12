@@ -489,12 +489,16 @@ def merge_time_ranges(timestamps):
     return ranges
 
 
-def report_missing_hours_by_address(db_conn):
+def report_missing_hours_by_address(db_conn, output_json_path=None):
     """
     Generate a comprehensive report of missing hourly weather data by address.
     
     Scans all display groups, collects missing hours by weather address,
     and consolidates overlapping time ranges into minimal sets of ranges.
+    
+    Args:
+        db_conn: Database connection
+        output_json_path: Optional path to output JSON file with structured missing hours data
     """
     # Get all display group IDs
     display_group_ids = get_all_display_group_ids(db_conn)
@@ -514,6 +518,16 @@ def report_missing_hours_by_address(db_conn):
                 missing_by_address[weather_address] = []
             missing_by_address[weather_address].append(missing_hour)
     
+    # Prepare data for JSON output if requested
+    json_data = None
+    if output_json_path:
+        json_data = {
+            "report_generated": datetime.now(timezone.utc).isoformat(),
+            "total_display_groups_analyzed": len(display_group_ids),
+            "addresses_with_missing_data": len(missing_by_address),
+            "missing_hours_by_address": {}
+        }
+    
     # Generate report
     print("\n" + "="*80)
     print("MISSING HOURLY WEATHER DATA REPORT")
@@ -521,9 +535,21 @@ def report_missing_hours_by_address(db_conn):
     
     if not missing_by_address:
         print("No missing hourly weather data found across all display groups.")
+        
+        if output_json_path:
+            json_data["total_missing_hours"] = 0
+            json_data["total_consolidated_ranges"] = 0
+            
+            with open(output_json_path, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            print(f"\nJSON report saved to: {output_json_path}")
+        
         return
     
     print(f"Found missing hourly data for {len(missing_by_address)} weather addresses.\n")
+    
+    total_missing_hours = 0
+    total_ranges = 0
     
     # Sort addresses for consistent output
     for address in sorted(missing_by_address.keys()):
@@ -537,26 +563,63 @@ def report_missing_hours_by_address(db_conn):
         
         print(f"Consolidated missing time ranges: {len(merged_ranges)}")
         
+        # Prepare JSON data for this address
+        if output_json_path:
+            address_data = {
+                "total_missing_hours": len(timestamps),
+                "consolidated_ranges": len(merged_ranges),
+                "missing_time_ranges": []
+            }
+        
         for start_time, end_time in merged_ranges:
             if start_time == end_time:
                 # Single hour missing
                 print(f"  {start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                if output_json_path:
+                    address_data["missing_time_ranges"].append({
+                        "start_time": start_time.isoformat(),
+                        "end_time": start_time.isoformat(),
+                        "timezone": str(start_time.tzinfo),
+                        "duration_hours": 1
+                    })
             else:
                 # Range of hours missing
                 print(f"  {start_time.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                if output_json_path:
+                    duration = int((end_time - start_time).total_seconds() / 3600) + 1
+                    address_data["missing_time_ranges"].append({
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "timezone": str(start_time.tzinfo),
+                        "duration_hours": duration
+                    })
+        
+        if output_json_path:
+            json_data["missing_hours_by_address"][address] = address_data
+        
+        total_missing_hours += len(timestamps)
+        total_ranges += len(merged_ranges)
         
         print()  # Empty line between addresses
     
     # Summary
-    total_missing_hours = sum(len(timestamps) for timestamps in missing_by_address.values())
-    total_ranges = sum(len(merge_time_ranges(timestamps)) for timestamps in missing_by_address.values())
-    
     print("="*80)
     print("SUMMARY")
     print("="*80)
     print(f"Addresses with missing data: {len(missing_by_address)}")
     print(f"Total missing hours: {total_missing_hours}")
     print(f"Total consolidated ranges: {total_ranges}")
+    
+    # Save JSON output if requested
+    if output_json_path:
+        json_data["total_missing_hours"] = total_missing_hours
+        json_data["total_consolidated_ranges"] = total_ranges
+        
+        with open(output_json_path, 'w') as f:
+            json.dump(json_data, f, indent=2)
+        print(f"\nJSON report saved to: {output_json_path}")
 
 
 def process_all_locations(api_key, include_hourly=False, dry_run=False):
@@ -887,16 +950,23 @@ def main():
                         help="Scan all display group IDs and list those with missing hourly weather data")
     parser.add_argument("--report-missing-hours-by-address", action='store_true',
                         help="Generate a comprehensive report of missing hourly weather data by address with consolidated time ranges")
+    parser.add_argument("--output-json", type=str,
+                        help="Output JSON file path for the missing hours report (use with --report-missing-hours-by-address)")
     args = parser.parse_args()
 
     api_key = read_api_key()
     if not api_key:
         return
 
+    # Validate --output-json usage
+    if args.output_json and not args.report_missing_hours_by_address:
+        print("Error: --output-json can only be used with --report-missing-hours-by-address.")
+        return
+
     # Handle the new --report-missing-hours-by-address option
     if args.report_missing_hours_by_address:
         if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours:
-            print("Error: --report-missing-hours-by-address cannot be used with other options.")
+            print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json.")
             return
         
         db_conn = psycopg2.connect(
@@ -907,14 +977,14 @@ def main():
         )
         
         try:
-            report_missing_hours_by_address(db_conn)
+            report_missing_hours_by_address(db_conn, output_json_path=args.output_json)
         finally:
             db_conn.close()
         return
 
     # Handle the new --list-display-group-ids-missing-hours option
     if args.list_display_group_ids_missing_hours:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json:
             print("Error: --list-display-group-ids-missing-hours cannot be used with other options.")
             return
         
@@ -944,8 +1014,8 @@ def main():
 
     # Handle the new --run-for-all-locations option
     if args.run_for_all_locations:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address:
-            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, or --report-missing-hours-by-address options.")
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json:
+            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, or --output-json options.")
             return
         
         print("Running weather data collection for all locations...")
@@ -954,8 +1024,8 @@ def main():
 
     # Handle the new --update-for-display-group-id option
     if args.update_for_display_group_id:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address:
-            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, or --report-missing-hours-by-address options.")
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json:
+            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, or --output-json options.")
             return
         
         db_conn = psycopg2.connect(
