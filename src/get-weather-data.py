@@ -186,6 +186,68 @@ def get_all_display_group_ids(db_conn):
         display_group_ids = [row[0] for row in cur.fetchall()]
     return display_group_ids
 
+#---------- BEGIN NEW ------
+def get_active_weather_addresses(db_conn):
+    """
+    Retrieve weather addresses that have display groups needing recent weather data.
+
+    A display group needs recent data if:
+    1. test_end_date is None (ongoing test), OR
+    2. test_end_date + day_start_seconds in local timezone is within the last 48 hours
+
+    Returns a list of unique weather addresses that need recent data.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
+            FROM display_group
+            WHERE weather_address IS NOT NULL
+            AND test_start_date IS NOT NULL
+            ORDER BY weather_address
+        """)
+
+        display_groups = cur.fetchall()
+
+    active_addresses = set()
+    now_utc = datetime.now(timezone.utc)
+    cutoff_hours = 48  # Consider display groups active if they ended within this many hours
+
+    print(f"Analyzing {len(display_groups)} display groups to determine active weather addresses...")
+
+    for test_start_date, test_end_date, day_start_seconds, tz_name, weather_address in display_groups:
+        try:
+            # Parse timezone
+            local_tz = pytz.timezone(tz_name)
+
+            # If test_end_date is None, the test is ongoing and needs recent data
+            if test_end_date is None:
+                active_addresses.add(weather_address)
+                print(f"  Active (ongoing): {weather_address}")
+                continue
+
+            # Compute the actual end time: test_end_date + day_start_seconds in local timezone
+            end_datetime = datetime.combine(test_end_date, datetime.min.time())
+            end_datetime += timedelta(seconds=day_start_seconds)
+            end_datetime_local = local_tz.localize(end_datetime)
+
+            # Convert to UTC for comparison
+            end_datetime_utc = end_datetime_local.astimezone(timezone.utc)
+
+            # Check if the test ended within the cutoff period
+            hours_since_end = (now_utc - end_datetime_utc).total_seconds() / 3600
+
+            if hours_since_end <= cutoff_hours:
+                active_addresses.add(weather_address)
+                print(f"  Active (ended {hours_since_end:.1f}h ago): {weather_address}")
+            else:
+                print(f"  Inactive (ended {hours_since_end:.1f}h ago): {weather_address}")
+
+        except pytz.exceptions.UnknownTimeZoneError:
+            print(f"  Skipping (invalid timezone '{tz_name}'): {weather_address}")
+            continue
+
+    return sorted(list(active_addresses))
+#---------- END NEW ------
 
 def check_missing_hours_for_display_group(db_conn, display_group_id):
     """
@@ -621,6 +683,67 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
             json.dump(json_data, f, indent=2)
         print(f"\nJSON report saved to: {output_json_path}")
 
+#----- BEGIN NEW -------
+def process_active_locations(api_key, include_hourly=False, dry_run=False):
+    """
+    Process weather data for active locations only (those with display groups needing recent data).
+    Fetches data for the previous 24 hours for each active location.
+
+    This is more efficient than process_all_locations() as it only fetches data for addresses
+    that have display groups with ongoing tests or tests that ended recently.
+
+    Timezone handling:
+    - Calculates date range using UTC for consistency
+    - API interprets dates in each location's local timezone
+    - This ensures each location gets its local "previous 24 hours"
+    """
+    # Connect to database
+    db_conn = psycopg2.connect(
+        host=os.environ['PGHOST_2'],
+        user=os.environ['PGUSER_2'],
+        dbname=os.environ['PGDATABASE_2'],
+        port=os.environ['PGPORT_2']
+    )
+
+    try:
+        # Get active locations from database
+        locations = get_active_weather_addresses(db_conn)
+        print(f"Found {len(locations)} active locations to process")
+
+        if not locations:
+            print("No active locations found. All display groups have ended outside the 48-hour window.")
+            return
+
+        # Calculate date range for previous 24 hours
+        start_date, end_date = calculate_previous_24_hours()
+        print(f"Processing data for date range: {start_date} to {end_date}")
+
+        # Process each active location
+        for i, address in enumerate(locations, 1):
+            print(f"\n[{i}/{len(locations)}] Processing active location: {address}")
+
+            # Fetch weather data for this location
+            weather_data = fetch_weather_data(
+                address, start_date, end_date, api_key, include_hourly=include_hourly)
+
+            if weather_data is None:
+                print(f"Failed to fetch weather data for {address}. Skipping.")
+                continue
+
+            # Insert/update weather data
+            if dry_run:
+                print(f"Dry run mode: Would insert/update data for {address}")
+                insert_weather_data(None, address, weather_data,
+                                  include_hourly=include_hourly, dry_run=True)
+            else:
+                insert_weather_data(db_conn, address, weather_data,
+                                  include_hourly=include_hourly, dry_run=False)
+                print(f"Weather data for {address} processed successfully.")
+
+    finally:
+        db_conn.close()
+
+#----- END NEW -------
 
 def process_all_locations(api_key, include_hourly=False, dry_run=False):
     """
@@ -944,6 +1067,10 @@ def main():
                         help="Fetch and populate missing tz values for the specified address")
     parser.add_argument("--run-for-all-locations", action='store_true',
                         help="Run weather data collection for all locations in the weather_location table, fetching the previous 24 hours of data using UTC-based date calculation")
+#------- BEGIN NEW --------
+    parser.add_argument("--run-for-active-locations", action='store_true',
+                        help="Run weather data collection for active locations only (those with display groups needing recent data), fetching the previous 24 hours of data using UTC-based date calculation")
+#------- END NEW --------
     parser.add_argument("--update-for-display-group-id", type=int,
                         help="Update missing hourly weather data for a specific display group ID")
     parser.add_argument("--list-display-group-ids-missing-hours", action='store_true',
@@ -965,7 +1092,7 @@ def main():
 
     # Handle the new --report-missing-hours-by-address option
     if args.report_missing_hours_by_address:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations:
             print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json.")
             return
         
@@ -984,7 +1111,7 @@ def main():
 
     # Handle the new --list-display-group-ids-missing-hours option
     if args.list_display_group_ids_missing_hours:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations:
             print("Error: --list-display-group-ids-missing-hours cannot be used with other options.")
             return
         
@@ -1012,10 +1139,23 @@ def main():
             db_conn.close()
         return
 
+#------- BEGIN NEW --------
+# Handle the new --run-for-active-locations option
+    if args.run_for_active_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations:
+            print("Error: --run-for-active-locations cannot be used with other options.")
+            return
+        
+        print("Running weather data collection for active locations...")
+        process_active_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run)
+        return
+#------- END NEW --------
+
     # Handle the new --run-for-all-locations option
     if args.run_for_all_locations:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json:
-            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, or --output-json options.")
+
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations:
+            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, or --run-for-active-locations.")
             return
         
         print("Running weather data collection for all locations...")
@@ -1024,8 +1164,8 @@ def main():
 
     # Handle the new --update-for-display-group-id option
     if args.update_for_display_group_id:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json:
-            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, or --output-json options.")
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.run_for_active_locations:
+            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, or --run-for-all-locations.")
             return
         
         db_conn = psycopg2.connect(
@@ -1040,7 +1180,7 @@ def main():
 
     # Existing functionality - require address for all other operations
     if not args.address:
-        print("Error: --address is required when not using --run-for-all-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, or --report-missing-hours-by-address.")
+        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, or --report-missing-hours-by-address.")
         return
 
     # Calculate yesterday's date based on the time zone offset
