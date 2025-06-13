@@ -577,6 +577,152 @@ def merge_time_ranges(timestamps):
     return ranges
 
 
+def fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, dry_run=False, max_days_per_request=7):
+    """
+    Fetch and insert missing hourly weather data for specified addresses and date ranges.
+    
+    Args:
+        db_conn: Database connection
+        api_key: Visual Crossing API key
+        addresses_with_ranges: Dict mapping addresses to lists of (start_date, end_date) tuples
+        dry_run: If True, show what would be done without executing
+        max_days_per_request: Maximum days to fetch in a single request (for performance)
+    """
+    total_addresses = len(addresses_with_ranges)
+    total_ranges_processed = 0
+    total_days_fetched = 0
+    
+    for address_idx, (address, date_ranges) in enumerate(addresses_with_ranges.items(), 1):
+        print(f"\n[{address_idx}/{total_addresses}] Processing missing hours for: {address}")
+        print(f"  Total date ranges to fetch: {len(date_ranges)}")
+        
+        for range_idx, (start_date, end_date) in enumerate(date_ranges, 1):
+            print(f"  [{range_idx}/{len(date_ranges)}] Date range: {start_date} to {end_date}")
+            
+            # Calculate the number of days in this range
+            start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+            days_in_range = (end_date_obj - start_date_obj).days + 1
+            
+            print(f"    Days to fetch: {days_in_range}")
+            
+            # Split large date ranges into smaller chunks
+            current_start = start_date_obj
+            while current_start <= end_date_obj:
+                # Calculate chunk end date
+                chunk_end = min(current_start + timedelta(days=max_days_per_request - 1), end_date_obj)
+                
+                chunk_start_str = current_start.strftime("%Y-%m-%d")
+                chunk_end_str = chunk_end.strftime("%Y-%m-%d")
+                
+                if dry_run:
+                    print(f"    [DRY RUN] Would fetch: {chunk_start_str} to {chunk_end_str}")
+                else:
+                    print(f"    Fetching: {chunk_start_str} to {chunk_end_str}")
+                    
+                    # Fetch weather data with hourly information
+                    weather_data = fetch_weather_data(
+                        address, chunk_start_str, chunk_end_str, api_key, include_hourly=True)
+                    
+                    if weather_data is None:
+                        print(f"    ERROR: Failed to fetch weather data for {chunk_start_str} to {chunk_end_str}")
+                        # Continue with next chunk despite error
+                    else:
+                        # Insert the weather data
+                        insert_weather_data(db_conn, address, weather_data, include_hourly=True)
+                        chunk_days = (chunk_end - current_start).days + 1
+                        total_days_fetched += chunk_days
+                        print(f"    Successfully inserted hourly data for {chunk_days} days")
+                
+                # Move to next chunk
+                current_start = chunk_end + timedelta(days=1)
+            
+            total_ranges_processed += 1
+    
+    # Summary
+    print("\n" + "="*80)
+    print("FETCH MISSING HOURS SUMMARY")
+    print("="*80)
+    print(f"Addresses processed: {total_addresses}")
+    print(f"Date ranges processed: {total_ranges_processed}")
+    if not dry_run:
+        print(f"Total days fetched: {total_days_fetched}")
+    else:
+        print("DRY RUN - No data was actually fetched")
+
+
+def collect_missing_hours_by_address(db_conn, include_inactive=False):
+    """
+    Collect all missing hours organized by address with consolidated date ranges.
+    
+    This is a refactored version of report_missing_hours_by_address that returns
+    the data structure instead of printing a report.
+    
+    Args:
+        db_conn: Database connection
+        include_inactive: If False (default), only consider active display groups.
+                         If True, consider all display groups regardless of active status.
+    
+    Returns:
+        Dict mapping addresses to lists of (start_date, end_date) tuples
+    """
+    # Get all display group IDs
+    display_group_ids = get_all_display_group_ids(db_conn, include_inactive=include_inactive)
+    
+    print(f"Analyzing {len(display_group_ids)} {'display groups' if include_inactive else 'active display groups'} for missing hourly weather data...")
+    
+    # Collect missing hours by address
+    missing_by_address = {}
+    
+    for i, display_group_id in enumerate(display_group_ids, 1):
+        print(f"[{i}/{len(display_group_ids)}] Analyzing display group {display_group_id}...")
+        
+        missing_hours = get_missing_hours_for_display_group(db_conn, display_group_id)
+        
+        for weather_address, missing_hour in missing_hours:
+            if weather_address not in missing_by_address:
+                missing_by_address[weather_address] = []
+            missing_by_address[weather_address].append(missing_hour)
+    
+    # Convert missing hours to date ranges
+    addresses_with_ranges = {}
+    
+    for address, timestamps in missing_by_address.items():
+        # Get unique dates from timestamps
+        dates_needed = set()
+        for timestamp in timestamps:
+            dates_needed.add(timestamp.date())
+        
+        # Convert to sorted list of date strings
+        sorted_dates = sorted(dates_needed)
+        
+        # Merge consecutive dates into ranges
+        if sorted_dates:
+            ranges = []
+            range_start = sorted_dates[0]
+            range_end = sorted_dates[0]
+            
+            for i in range(1, len(sorted_dates)):
+                current_date = sorted_dates[i]
+                
+                # Check if current date is consecutive
+                if current_date == range_end + timedelta(days=1):
+                    # Extend the current range
+                    range_end = current_date
+                else:
+                    # Gap found, close current range and start a new one
+                    ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
+                    range_start = current_date
+                    range_end = current_date
+            
+            # Add the final range
+            ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
+            
+            addresses_with_ranges[address] = ranges
+    
+    return addresses_with_ranges
+
+
 def report_missing_hours_by_address(db_conn, output_json_path=None, include_inactive=False):
     """
     Generate a comprehensive report of missing hourly weather data by address.
@@ -1148,6 +1294,14 @@ def main():
                         help="Output JSON file path for the missing hours report (use with --report-missing-hours-by-address)")
     parser.add_argument("--include-inactive", action='store_true',
                         help="Include inactive display groups in operations (default is to only process active display groups)")
+    parser.add_argument("--fetch-missing-hours", action='store_true',
+                        help="Find and fetch all missing hourly weather data for active display groups")
+    parser.add_argument("--fetch-missing-hours-for-address", type=str,
+                        help="Fetch missing hourly weather data for a specific address")
+    parser.add_argument("--fetch-from-report", type=str,
+                        help="Fetch missing hours based on a previously generated JSON report file")
+    parser.add_argument("--max-days-per-request", type=int, default=7,
+                        help="Maximum number of days to fetch in a single API request (default: 7)")
     args = parser.parse_args()
 
     api_key = read_api_key()
@@ -1159,9 +1313,146 @@ def main():
         print("Error: --output-json can only be used with --report-missing-hours-by-address.")
         return
 
+    # Handle --fetch-missing-hours option
+    if args.fetch_missing_hours:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --fetch-missing-hours cannot be used with other main operation options.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            print(f"Finding and fetching missing hourly weather data for {'all' if args.include_inactive else 'active'} display groups...")
+            
+            # Collect missing hours
+            addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=args.include_inactive)
+            
+            if not addresses_with_ranges:
+                print(f"\nNo missing hourly weather data found across {'all' if args.include_inactive else 'active'} display groups.")
+                return
+            
+            print(f"\nFound {len(addresses_with_ranges)} addresses with missing hours.")
+            
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle --fetch-missing-hours-for-address option
+    if args.fetch_missing_hours_for_address:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report:
+            print("Error: --fetch-missing-hours-for-address cannot be used with other main operation options.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            target_address = args.fetch_missing_hours_for_address
+            print(f"Finding and fetching missing hourly weather data for address: {target_address}")
+            
+            # Collect missing hours for all addresses
+            addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=args.include_inactive)
+            
+            # Filter to only the requested address
+            if target_address not in addresses_with_ranges:
+                print(f"\nNo missing hourly weather data found for address: {target_address}")
+                return
+            
+            filtered_addresses = {target_address: addresses_with_ranges[target_address]}
+            
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, filtered_addresses, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle --fetch-from-report option
+    if args.fetch_from_report:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_missing_hours_for_address:
+            print("Error: --fetch-from-report cannot be used with other main operation options.")
+            return
+        
+        # Read the JSON report file
+        try:
+            with open(args.fetch_from_report, 'r') as f:
+                report_data = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: Report file not found: {args.fetch_from_report}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in report file: {e}")
+            return
+        
+        # Extract addresses and date ranges from the report
+        if "missing_hours_by_address" not in report_data:
+            print("Error: Invalid report format - missing 'missing_hours_by_address' key")
+            return
+        
+        addresses_with_ranges = {}
+        
+        for address, address_data in report_data["missing_hours_by_address"].items():
+            if "missing_time_ranges" not in address_data:
+                continue
+            
+            # Extract date ranges from the report
+            date_ranges = []
+            for time_range in address_data["missing_time_ranges"]:
+                # Parse the ISO format timestamps
+                start_time = datetime.fromisoformat(time_range["start_time"].replace('+00:00', '+0000'))
+                end_time = datetime.fromisoformat(time_range["end_time"].replace('+00:00', '+0000'))
+                
+                # Convert to date strings
+                start_date = start_time.date().strftime("%Y-%m-%d")
+                end_date = end_time.date().strftime("%Y-%m-%d")
+                
+                # Add to ranges if not already present
+                if (start_date, end_date) not in date_ranges:
+                    date_ranges.append((start_date, end_date))
+            
+            if date_ranges:
+                addresses_with_ranges[address] = sorted(date_ranges)
+        
+        if not addresses_with_ranges:
+            print("No missing hours found in the report file.")
+            return
+        
+        print(f"Report generated: {report_data.get('report_generated', 'Unknown')}")
+        print(f"Found {len(addresses_with_ranges)} addresses with missing hours in the report.")
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
     # Handle the new --report-missing-hours-by-address option
     if args.report_missing_hours_by_address:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
             print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json and --include-inactive.")
             return
         
@@ -1180,7 +1471,7 @@ def main():
 
     # Handle the new --list-display-group-ids-missing-hours option
     if args.list_display_group_ids_missing_hours:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
             print("Error: --list-display-group-ids-missing-hours cannot be used with other options except --include-inactive.")
             return
         
@@ -1211,7 +1502,7 @@ def main():
 #------- BEGIN NEW --------
 # Handle the new --run-for-active-locations option
     if args.run_for_active_locations:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
             print("Error: --run-for-active-locations cannot be used with other options except --include-inactive.")
             return
         
@@ -1223,8 +1514,8 @@ def main():
     # Handle the new --run-for-all-locations option
     if args.run_for_all_locations:
 
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations:
-            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, or --run-for-active-locations.")
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, --run-for-active-locations, or the new fetch options.")
             return
         
         print("Running weather data collection for all locations...")
@@ -1233,8 +1524,8 @@ def main():
 
     # Handle the new --update-for-display-group-id option
     if args.update_for_display_group_id:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.run_for_active_locations:
-            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, or --run-for-all-locations.")
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, --run-for-all-locations, --run-for-active-locations, or the new fetch options.")
             return
         
         db_conn = psycopg2.connect(
@@ -1249,7 +1540,7 @@ def main():
 
     # Existing functionality - require address for all other operations
     if not args.address:
-        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, or --report-missing-hours-by-address.")
+        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --fetch-missing-hours, --fetch-missing-hours-for-address, or --fetch-from-report.")
         return
 
     # Calculate yesterday's date based on the time zone offset
