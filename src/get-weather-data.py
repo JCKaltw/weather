@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from psycopg2 import IntegrityError
 import pytz
+from collections import defaultdict
 
 
 def read_api_key():
@@ -562,7 +563,24 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
         db_conn: Database connection
         output_json_path: Optional path to output JSON file with structured missing hours data
     """
-    # Get all display group IDs
+
+
+
+    # ------------------------------------------------------------------
+    # 1. Build a mapping of weather_address  ->  [display_group_id, …]
+    #    This will let us add the new “display_groups” array later.
+    # ------------------------------------------------------------------
+    address_to_groups = defaultdict(list)
+    with db_conn.cursor() as cur:
+        cur.execute("""
+            SELECT display_group_id, weather_address
+            FROM display_group
+            WHERE weather_address IS NOT NULL
+        """)
+        for display_group_id, weather_address in cur.fetchall():
+            address_to_groups[weather_address].append(display_group_id)
+
+    # 2. Continue with the existing logic (unchanged)  ------------------
     display_group_ids = get_all_display_group_ids(db_conn)
     
     print(f"Analyzing {len(display_group_ids)} display groups for missing hourly weather data...")
@@ -630,7 +648,9 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
             address_data = {
                 "total_missing_hours": len(timestamps),
                 "consolidated_ranges": len(merged_ranges),
-                "missing_time_ranges": []
+                "missing_time_ranges": [],
+                "display_groups": sorted(address_to_groups.get(address, []))
+
             }
         
         for start_time, end_time in merged_ranges:
