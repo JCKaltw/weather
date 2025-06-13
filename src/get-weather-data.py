@@ -577,7 +577,7 @@ def merge_time_ranges(timestamps):
     return ranges
 
 
-def fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, dry_run=False, max_days_per_request=7):
+def fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, dry_run=False, max_days_per_request=None):
     """
     Fetch and insert missing hourly weather data for specified addresses and date ranges.
     
@@ -586,7 +586,7 @@ def fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, d
         api_key: Visual Crossing API key
         addresses_with_ranges: Dict mapping addresses to lists of (start_date, end_date) tuples
         dry_run: If True, show what would be done without executing
-        max_days_per_request: Maximum days to fetch in a single request (for performance)
+        max_days_per_request: Maximum days to fetch in a single request (None = no limit)
     """
     total_addresses = len(addresses_with_ranges)
     total_ranges_processed = 0
@@ -606,36 +606,55 @@ def fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, d
             
             print(f"    Days to fetch: {days_in_range}")
             
-            # Split large date ranges into smaller chunks
-            current_start = start_date_obj
-            while current_start <= end_date_obj:
-                # Calculate chunk end date
-                chunk_end = min(current_start + timedelta(days=max_days_per_request - 1), end_date_obj)
-                
-                chunk_start_str = current_start.strftime("%Y-%m-%d")
-                chunk_end_str = chunk_end.strftime("%Y-%m-%d")
-                
+            # If max_days_per_request is None or the range is within limit, fetch all at once
+            if max_days_per_request is None or days_in_range <= max_days_per_request:
                 if dry_run:
-                    print(f"    [DRY RUN] Would fetch: {chunk_start_str} to {chunk_end_str}")
+                    print(f"    [DRY RUN] Would fetch: {start_date} to {end_date}")
                 else:
-                    print(f"    Fetching: {chunk_start_str} to {chunk_end_str}")
+                    print(f"    Fetching: {start_date} to {end_date}")
                     
                     # Fetch weather data with hourly information
                     weather_data = fetch_weather_data(
-                        address, chunk_start_str, chunk_end_str, api_key, include_hourly=True)
+                        address, start_date, end_date, api_key, include_hourly=True)
                     
                     if weather_data is None:
-                        print(f"    ERROR: Failed to fetch weather data for {chunk_start_str} to {chunk_end_str}")
-                        # Continue with next chunk despite error
+                        print(f"    ERROR: Failed to fetch weather data for {start_date} to {end_date}")
                     else:
                         # Insert the weather data
                         insert_weather_data(db_conn, address, weather_data, include_hourly=True)
-                        chunk_days = (chunk_end - current_start).days + 1
-                        total_days_fetched += chunk_days
-                        print(f"    Successfully inserted hourly data for {chunk_days} days")
-                
-                # Move to next chunk
-                current_start = chunk_end + timedelta(days=1)
+                        total_days_fetched += days_in_range
+                        print(f"    Successfully inserted hourly data for {days_in_range} days")
+            else:
+                # Split large date ranges into smaller chunks
+                current_start = start_date_obj
+                while current_start <= end_date_obj:
+                    # Calculate chunk end date
+                    chunk_end = min(current_start + timedelta(days=max_days_per_request - 1), end_date_obj)
+                    
+                    chunk_start_str = current_start.strftime("%Y-%m-%d")
+                    chunk_end_str = chunk_end.strftime("%Y-%m-%d")
+                    
+                    if dry_run:
+                        print(f"    [DRY RUN] Would fetch: {chunk_start_str} to {chunk_end_str}")
+                    else:
+                        print(f"    Fetching: {chunk_start_str} to {chunk_end_str}")
+                        
+                        # Fetch weather data with hourly information
+                        weather_data = fetch_weather_data(
+                            address, chunk_start_str, chunk_end_str, api_key, include_hourly=True)
+                        
+                        if weather_data is None:
+                            print(f"    ERROR: Failed to fetch weather data for {chunk_start_str} to {chunk_end_str}")
+                            # Continue with next chunk despite error
+                        else:
+                            # Insert the weather data
+                            insert_weather_data(db_conn, address, weather_data, include_hourly=True)
+                            chunk_days = (chunk_end - current_start).days + 1
+                            total_days_fetched += chunk_days
+                            print(f"    Successfully inserted hourly data for {chunk_days} days")
+                    
+                    # Move to next chunk
+                    current_start = chunk_end + timedelta(days=1)
             
             total_ranges_processed += 1
     
@@ -1300,8 +1319,8 @@ def main():
                         help="Fetch missing hourly weather data for a specific address")
     parser.add_argument("--fetch-from-report", type=str,
                         help="Fetch missing hours based on a previously generated JSON report file")
-    parser.add_argument("--max-days-per-request", type=int, default=7,
-                        help="Maximum number of days to fetch in a single API request (default: 7)")
+    parser.add_argument("--max-days-per-request", type=int, default=None,
+                        help="Maximum number of days to fetch in a single batch (default: no limit)")
     args = parser.parse_args()
 
     api_key = read_api_key()
