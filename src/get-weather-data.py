@@ -177,18 +177,25 @@ def get_all_locations(db_conn):
     return locations
 
 
-def get_all_display_group_ids(db_conn):
+def get_all_display_group_ids(db_conn, include_inactive=False):
     """
     Retrieve all display group IDs from the display_group table.
     Returns a list of display group ID integers.
+    
+    Args:
+        include_inactive: If False (default), only return active display groups.
+                         If True, return all display groups regardless of active status.
     """
     with db_conn.cursor() as cur:
-        cur.execute("SELECT display_group_id FROM display_group ORDER BY display_group_id")
+        if include_inactive:
+            cur.execute("SELECT display_group_id FROM display_group ORDER BY display_group_id")
+        else:
+            cur.execute("SELECT display_group_id FROM display_group WHERE active = true ORDER BY display_group_id")
         display_group_ids = [row[0] for row in cur.fetchall()]
     return display_group_ids
 
 #---------- BEGIN NEW ------
-def get_active_weather_addresses(db_conn):
+def get_active_weather_addresses(db_conn, include_inactive=False):
     """
     Retrieve weather addresses that have display groups needing recent weather data.
 
@@ -196,16 +203,30 @@ def get_active_weather_addresses(db_conn):
     1. test_end_date is None (ongoing test), OR
     2. test_end_date + day_start_seconds in local timezone is within the last 48 hours
 
+    Args:
+        include_inactive: If False (default), only consider active display groups.
+                         If True, consider all display groups regardless of active status.
+
     Returns a list of unique weather addresses that need recent data.
     """
     with db_conn.cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
-            FROM display_group
-            WHERE weather_address IS NOT NULL
-            AND test_start_date IS NOT NULL
-            ORDER BY weather_address
-        """)
+        if include_inactive:
+            cur.execute("""
+                SELECT DISTINCT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
+                FROM display_group
+                WHERE weather_address IS NOT NULL
+                AND test_start_date IS NOT NULL
+                ORDER BY weather_address
+            """)
+        else:
+            cur.execute("""
+                SELECT DISTINCT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
+                FROM display_group
+                WHERE weather_address IS NOT NULL
+                AND test_start_date IS NOT NULL
+                AND active = true
+                ORDER BY weather_address
+            """)
 
         display_groups = cur.fetchall()
 
@@ -360,16 +381,20 @@ def check_missing_hours_for_display_group(db_conn, display_group_id):
         return False  # No missing hours found
 
 
-def list_display_group_ids_missing_hours(db_conn):
+def list_display_group_ids_missing_hours(db_conn, include_inactive=False):
     """
     Scan all display group IDs and identify those with missing hourly weather data.
     Returns a list of display group IDs that have missing hours.
+    
+    Args:
+        include_inactive: If False (default), only scan active display groups.
+                         If True, scan all display groups regardless of active status.
     """
     # Get all display group IDs
-    display_group_ids = get_all_display_group_ids(db_conn)
+    display_group_ids = get_all_display_group_ids(db_conn, include_inactive=include_inactive)
     missing_hours_group_ids = []
     
-    print(f"Scanning {len(display_group_ids)} display groups for missing hourly weather data...")
+    print(f"Scanning {len(display_group_ids)} {'display groups' if include_inactive else 'active display groups'} for missing hourly weather data...")
     
     for i, display_group_id in enumerate(display_group_ids, 1):
         print(f"[{i}/{len(display_group_ids)}] Checking display group {display_group_id}...")
@@ -552,7 +577,7 @@ def merge_time_ranges(timestamps):
     return ranges
 
 
-def report_missing_hours_by_address(db_conn, output_json_path=None):
+def report_missing_hours_by_address(db_conn, output_json_path=None, include_inactive=False):
     """
     Generate a comprehensive report of missing hourly weather data by address.
     
@@ -562,28 +587,38 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
     Args:
         db_conn: Database connection
         output_json_path: Optional path to output JSON file with structured missing hours data
+        include_inactive: If False (default), only report on active display groups.
+                         If True, report on all display groups regardless of active status.
     """
 
 
 
     # ------------------------------------------------------------------
     # 1. Build a mapping of weather_address  ->  [display_group_id, …]
-    #    This will let us add the new “display_groups” array later.
+    #    This will let us add the new "display_groups" array later.
     # ------------------------------------------------------------------
     address_to_groups = defaultdict(list)
     with db_conn.cursor() as cur:
-        cur.execute("""
-            SELECT display_group_id, weather_address
-            FROM display_group
-            WHERE weather_address IS NOT NULL
-        """)
+        if include_inactive:
+            cur.execute("""
+                SELECT display_group_id, weather_address
+                FROM display_group
+                WHERE weather_address IS NOT NULL
+            """)
+        else:
+            cur.execute("""
+                SELECT display_group_id, weather_address
+                FROM display_group
+                WHERE weather_address IS NOT NULL
+                AND active = true
+            """)
         for display_group_id, weather_address in cur.fetchall():
             address_to_groups[weather_address].append(display_group_id)
 
     # 2. Continue with the existing logic (unchanged)  ------------------
-    display_group_ids = get_all_display_group_ids(db_conn)
+    display_group_ids = get_all_display_group_ids(db_conn, include_inactive=include_inactive)
     
-    print(f"Analyzing {len(display_group_ids)} display groups for missing hourly weather data...")
+    print(f"Analyzing {len(display_group_ids)} {'display groups' if include_inactive else 'active display groups'} for missing hourly weather data...")
     
     # Collect missing hours by address
     missing_by_address = {}
@@ -605,16 +640,19 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
             "report_generated": datetime.now(timezone.utc).isoformat(),
             "total_display_groups_analyzed": len(display_group_ids),
             "addresses_with_missing_data": len(missing_by_address),
+            "include_inactive": include_inactive,
             "missing_hours_by_address": {}
         }
     
     # Generate report
     print("\n" + "="*80)
     print("MISSING HOURLY WEATHER DATA REPORT")
+    if not include_inactive:
+        print("(Active Display Groups Only)")
     print("="*80)
     
     if not missing_by_address:
-        print("No missing hourly weather data found across all display groups.")
+        print(f"No missing hourly weather data found across all {'display groups' if include_inactive else 'active display groups'}.")
         
         if output_json_path:
             json_data["total_missing_hours"] = 0
@@ -693,6 +731,8 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
     print(f"Addresses with missing data: {len(missing_by_address)}")
     print(f"Total missing hours: {total_missing_hours}")
     print(f"Total consolidated ranges: {total_ranges}")
+    if not include_inactive:
+        print("Note: Only active display groups were analyzed")
     
     # Save JSON output if requested
     if output_json_path:
@@ -704,7 +744,7 @@ def report_missing_hours_by_address(db_conn, output_json_path=None):
         print(f"\nJSON report saved to: {output_json_path}")
 
 #----- BEGIN NEW -------
-def process_active_locations(api_key, include_hourly=False, dry_run=False):
+def process_active_locations(api_key, include_hourly=False, dry_run=False, include_inactive=False):
     """
     Process weather data for active locations only (those with display groups needing recent data).
     Fetches data for the previous 24 hours for each active location.
@@ -716,6 +756,13 @@ def process_active_locations(api_key, include_hourly=False, dry_run=False):
     - Calculates date range using UTC for consistency
     - API interprets dates in each location's local timezone
     - This ensures each location gets its local "previous 24 hours"
+    
+    Args:
+        api_key: Visual Crossing API key
+        include_hourly: Whether to fetch hourly data
+        dry_run: If True, show what would be done without executing
+        include_inactive: If False (default), only process locations with active display groups.
+                         If True, process all locations regardless of active status.
     """
     # Connect to database
     db_conn = psycopg2.connect(
@@ -727,11 +774,11 @@ def process_active_locations(api_key, include_hourly=False, dry_run=False):
 
     try:
         # Get active locations from database
-        locations = get_active_weather_addresses(db_conn)
+        locations = get_active_weather_addresses(db_conn, include_inactive=include_inactive)
         print(f"Found {len(locations)} active locations to process")
 
         if not locations:
-            print("No active locations found. All display groups have ended outside the 48-hour window.")
+            print(f"No active locations found. All {'display groups' if include_inactive else 'active display groups'} have ended outside the 48-hour window.")
             return
 
         # Calculate date range for previous 24 hours
@@ -1099,6 +1146,8 @@ def main():
                         help="Generate a comprehensive report of missing hourly weather data by address with consolidated time ranges")
     parser.add_argument("--output-json", type=str,
                         help="Output JSON file path for the missing hours report (use with --report-missing-hours-by-address)")
+    parser.add_argument("--include-inactive", action='store_true',
+                        help="Include inactive display groups in operations (default is to only process active display groups)")
     args = parser.parse_args()
 
     api_key = read_api_key()
@@ -1113,7 +1162,7 @@ def main():
     # Handle the new --report-missing-hours-by-address option
     if args.report_missing_hours_by_address:
         if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations:
-            print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json.")
+            print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json and --include-inactive.")
             return
         
         db_conn = psycopg2.connect(
@@ -1124,7 +1173,7 @@ def main():
         )
         
         try:
-            report_missing_hours_by_address(db_conn, output_json_path=args.output_json)
+            report_missing_hours_by_address(db_conn, output_json_path=args.output_json, include_inactive=args.include_inactive)
         finally:
             db_conn.close()
         return
@@ -1132,7 +1181,7 @@ def main():
     # Handle the new --list-display-group-ids-missing-hours option
     if args.list_display_group_ids_missing_hours:
         if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations:
-            print("Error: --list-display-group-ids-missing-hours cannot be used with other options.")
+            print("Error: --list-display-group-ids-missing-hours cannot be used with other options except --include-inactive.")
             return
         
         db_conn = psycopg2.connect(
@@ -1143,7 +1192,7 @@ def main():
         )
         
         try:
-            missing_group_ids = list_display_group_ids_missing_hours(db_conn)
+            missing_group_ids = list_display_group_ids_missing_hours(db_conn, include_inactive=args.include_inactive)
             
             print(f"\nSummary:")
             print(f"Display groups with missing hourly weather data: {len(missing_group_ids)}")
@@ -1153,7 +1202,7 @@ def main():
                 for group_id in missing_group_ids:
                     print(f"  {group_id}")
             else:
-                print("All display groups have complete hourly weather data.")
+                print(f"All {'display groups' if args.include_inactive else 'active display groups'} have complete hourly weather data.")
                 
         finally:
             db_conn.close()
@@ -1163,11 +1212,11 @@ def main():
 # Handle the new --run-for-active-locations option
     if args.run_for_active_locations:
         if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations:
-            print("Error: --run-for-active-locations cannot be used with other options.")
+            print("Error: --run-for-active-locations cannot be used with other options except --include-inactive.")
             return
         
-        print("Running weather data collection for active locations...")
-        process_active_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run)
+        print(f"Running weather data collection for active locations{' (including inactive display groups)' if args.include_inactive else ''}...")
+        process_active_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run, include_inactive=args.include_inactive)
         return
 #------- END NEW --------
 
