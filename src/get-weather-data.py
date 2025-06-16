@@ -6,6 +6,39 @@
 # - Daily data: stored as YYYY-MM-DD dates + timezone string in 'tz' column  
 # - Hourly data: stored as local timestamps (YYYY-MM-DD HH:MM:SS) in location's timezone
 # - To interpret hourly data, always reference the corresponding weather_data.tz value
+#
+# DATABASE SCHEMA:
+# The following tables are expected to exist in the database:
+#
+# CREATE TABLE weather.weather_location (
+#     address VARCHAR(255) PRIMARY KEY
+# );
+#
+# CREATE TABLE weather.weather_data (
+#     id SERIAL PRIMARY KEY,
+#     date DATE NOT NULL,
+#     address VARCHAR(255) NOT NULL,
+#     temp DECIMAL(5,2),
+#     tempmin DECIMAL(5,2),
+#     tempmax DECIMAL(5,2),
+#     tz VARCHAR,
+#     FOREIGN KEY (address) REFERENCES weather.weather_location(address) ON DELETE CASCADE ON UPDATE CASCADE,
+#     UNIQUE (date, address)
+# );
+#
+# CREATE TABLE weather.hourly_data (
+#     id SERIAL PRIMARY KEY,
+#     weather_data_id INTEGER NOT NULL,
+#     hour TIMESTAMP NOT NULL,
+#     temp NUMERIC(5, 2),
+#     FOREIGN KEY (weather_data_id) REFERENCES weather.weather_data(id) ON DELETE CASCADE,
+#     UNIQUE (weather_data_id, hour)
+# );
+#
+# Note: The weather_location table serves as a master list of valid weather addresses.
+# The foreign key constraint ensures data integrity - weather data can only be inserted
+# for addresses that exist in weather_location. The script automatically adds new
+# addresses to weather_location as needed.
 
 import argparse
 import requests
@@ -90,15 +123,46 @@ def fetch_weather_data(address, start_date, end_date, api_key, include_hourly=Fa
             return None
 
 
+def ensure_location_exists(db_conn, address):
+    """
+    Ensure that the given address exists in the weather.weather_location table.
+    If it doesn't exist, insert it.
+    
+    Args:
+        db_conn: Database connection
+        address: Weather location address
+    """
+    if not db_conn:
+        return
+        
+    with db_conn.cursor() as cur:
+        # Check if address exists in weather_location
+        cur.execute("SELECT 1 FROM weather.weather_location WHERE address = %s", (address,))
+        if not cur.fetchone():
+            # Insert the address into weather_location if it doesn't exist
+            print(f"Adding new location '{address}' to weather.weather_location")
+            cur.execute("INSERT INTO weather.weather_location (address) VALUES (%s)", (address,))
+            db_conn.commit()
+
+
 def insert_weather_data(db_conn, address, weather_data, include_hourly=False, dry_run=False):
     timezone = weather_data['timezone']
+    
+    # Ensure weather_location entry exists before inserting weather data
+    if not dry_run:
+        ensure_location_exists(db_conn, address)
+    
     for day in weather_data['days']:
         sql_daily = "INSERT INTO weather.weather_data (date, address, temp, tempmin, tempmax, tz) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (date, address) DO UPDATE SET temp = EXCLUDED.temp, tempmin = EXCLUDED.tempmin, tempmax = EXCLUDED.tempmax, tz = EXCLUDED.tz RETURNING id;"
         params_daily = (day['datetime'], address, day['temp'],
                         day['tempmin'], day['tempmax'], timezone)
 
         if dry_run:
-            print("Dry run mode: SQL query that would be executed:")
+            print("Dry run mode: SQL queries that would be executed:")
+            print("-- Ensure location exists:")
+            print(f"SELECT 1 FROM weather.weather_location WHERE address = '{address}';")
+            print(f"INSERT INTO weather.weather_location (address) VALUES ('{address}'); -- if not exists")
+            print("-- Insert weather data:")
             print(sql_daily % params_daily)
         else:
             try:
@@ -1587,6 +1651,17 @@ def main():
         args.start_date = yesterday
     if not args.end_date:
         args.end_date = yesterday
+
+    # Ensure the address exists in weather_location table for single address operations
+    if not args.dry_run:
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        ensure_location_exists(db_conn, args.address)
+        db_conn.close()
 
     if args.get_missing_tz:
         db_conn = psycopg2.connect(
