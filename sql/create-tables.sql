@@ -3,7 +3,8 @@ CREATE SCHEMA IF NOT EXISTS weather;
 
 -- Create the weather.weather_location table (master list of locations)
 CREATE TABLE IF NOT EXISTS weather.weather_location (
-    address VARCHAR(255) PRIMARY KEY
+    address VARCHAR(255) PRIMARY KEY,
+    dirty BOOLEAN DEFAULT FALSE
 );
 
 -- Create the weather.weather_data table
