@@ -188,9 +188,20 @@ def get_all_display_group_ids(db_conn, include_inactive=False):
     """
     with db_conn.cursor() as cur:
         if include_inactive:
-            cur.execute("SELECT display_group_id FROM display_group ORDER BY display_group_id")
+            cur.execute("""
+                SELECT display_group_id 
+                FROM display_group 
+                WHERE is_removed = false OR is_removed IS NULL
+                ORDER BY display_group_id
+            """)
         else:
-            cur.execute("SELECT display_group_id FROM display_group WHERE active = true ORDER BY display_group_id")
+            cur.execute("""
+                SELECT display_group_id 
+                FROM display_group 
+                WHERE active = true 
+                AND (is_removed = false OR is_removed IS NULL)
+                ORDER BY display_group_id
+            """)
         display_group_ids = [row[0] for row in cur.fetchall()]
     return display_group_ids
 
@@ -216,6 +227,7 @@ def get_active_weather_addresses(db_conn, include_inactive=False):
                 FROM display_group
                 WHERE weather_address IS NOT NULL
                 AND test_start_date IS NOT NULL
+                AND (is_removed = false OR is_removed IS NULL)
                 ORDER BY weather_address
             """)
         else:
@@ -225,6 +237,7 @@ def get_active_weather_addresses(db_conn, include_inactive=False):
                 WHERE weather_address IS NOT NULL
                 AND test_start_date IS NOT NULL
                 AND active = true
+                AND (is_removed = false OR is_removed IS NULL)
                 ORDER BY weather_address
             """)
 
@@ -284,11 +297,12 @@ def check_missing_hours_for_display_group(db_conn, display_group_id):
             SELECT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
             FROM display_group 
             WHERE display_group_id = %s
+            AND (is_removed = false OR is_removed IS NULL)
         """, (display_group_id,))
         
         row = cur.fetchone()
         if row is None:
-            return False  # Display group not found
+            return False  # Display group not found or is_removed
         
         test_start_date, test_end_date, day_start_seconds, tz_name, weather_address = row
         
@@ -421,11 +435,12 @@ def get_missing_hours_for_display_group(db_conn, display_group_id):
             SELECT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
             FROM display_group 
             WHERE display_group_id = %s
+            AND (is_removed = false OR is_removed IS NULL)
         """, (display_group_id,))
         
         row = cur.fetchone()
         if row is None:
-            return []  # Display group not found
+            return []  # Display group not found or is_removed
         
         test_start_date, test_end_date, day_start_seconds, tz_name, weather_address = row
         
@@ -769,6 +784,7 @@ def report_missing_hours_by_address(db_conn, output_json_path=None, include_inac
                 SELECT display_group_id, weather_address
                 FROM display_group
                 WHERE weather_address IS NOT NULL
+                AND (is_removed = false OR is_removed IS NULL)
             """)
         else:
             cur.execute("""
@@ -776,6 +792,7 @@ def report_missing_hours_by_address(db_conn, output_json_path=None, include_inac
                 FROM display_group
                 WHERE weather_address IS NOT NULL
                 AND active = true
+                AND (is_removed = false OR is_removed IS NULL)
             """)
         for display_group_id, weather_address in cur.fetchall():
             address_to_groups[weather_address].append(display_group_id)
@@ -1118,11 +1135,12 @@ def update_for_display_group_id(db_conn, display_group_id, api_key, dry_run=Fals
             SELECT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
             FROM display_group 
             WHERE display_group_id = %s
+            AND (is_removed = false OR is_removed IS NULL)
         """, (display_group_id,))
         
         row = cur.fetchone()
         if row is None:
-            print(f"Display group {display_group_id} not found.")
+            print(f"Display group {display_group_id} not found or is removed.")
             return
         
         test_start_date, test_end_date, day_start_seconds, tz_name, weather_address = row
