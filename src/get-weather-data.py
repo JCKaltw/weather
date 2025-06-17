@@ -617,6 +617,266 @@ def get_missing_hours_for_display_group(db_conn, display_group_id):
         return missing_hours
 
 
+def get_display_group_time_range(db_conn, display_group_id):
+    """
+    Get the time range for a specific display group.
+    Returns a tuple of (weather_address, start_datetime, end_datetime, timezone_name) or None if not found.
+    """
+    with db_conn.cursor() as cur:
+        # Get display group parameters
+        cur.execute("""
+            SELECT test_start_date, test_end_date, day_start_seconds, timezone, weather_address
+            FROM display_group 
+            WHERE display_group_id = %s
+            AND (is_removed = false OR is_removed IS NULL)
+        """, (display_group_id,))
+        
+        row = cur.fetchone()
+        if row is None:
+            return None  # Display group not found or is_removed
+        
+        test_start_date, test_end_date, day_start_seconds, tz_name, weather_address = row
+        
+        if not weather_address or not test_start_date:
+            return None  # No weather address or test start date configured
+        
+        # Parse timezone
+        try:
+            local_tz = pytz.timezone(tz_name)
+        except pytz.exceptions.UnknownTimeZoneError:
+            return None  # Invalid timezone
+        
+        # Compute start time: test_start_date + day_start_seconds in local timezone
+        start_datetime = datetime.combine(test_start_date, datetime.min.time())
+        start_datetime += timedelta(seconds=day_start_seconds)
+        start_datetime_local = local_tz.localize(start_datetime)
+        
+        # Compute end time
+        if test_end_date:
+            # Use test_end_date + day_start_seconds
+            end_datetime = datetime.combine(test_end_date, datetime.min.time())
+            end_datetime += timedelta(seconds=day_start_seconds)
+            end_datetime_local = local_tz.localize(end_datetime)
+        else:
+            # Use current time minus 1 hour (last completed hour)
+            now_local = datetime.now(local_tz)
+            # Round down to the last completed hour
+            end_datetime_local = now_local.replace(minute=0, second=0, microsecond=0)
+        
+        return weather_address, start_datetime_local, end_datetime_local, tz_name
+
+
+def merge_overlapping_time_ranges(time_ranges):
+    """
+    Merge overlapping time ranges into a minimal set of non-overlapping ranges.
+    
+    Args:
+        time_ranges: List of (start_datetime, end_datetime) tuples
+    
+    Returns:
+        List of (start_datetime, end_datetime) tuples with no overlaps
+    """
+    if not time_ranges:
+        return []
+    
+    # Sort by start time
+    sorted_ranges = sorted(time_ranges, key=lambda x: x[0])
+    
+    merged = []
+    current_start, current_end = sorted_ranges[0]
+    
+    for start, end in sorted_ranges[1:]:
+        if start <= current_end:
+            # Overlapping or adjacent ranges - merge them
+            current_end = max(current_end, end)
+        else:
+            # No overlap - save current range and start a new one
+            merged.append((current_start, current_end))
+            current_start, current_end = start, end
+    
+    # Don't forget the last range
+    merged.append((current_start, current_end))
+    
+    return merged
+
+
+def check_missing_hours_for_time_ranges(db_conn, weather_address, time_ranges):
+    """
+    Check for missing hourly weather data within the specified time ranges for a given address.
+    Returns a list of (weather_address, missing_hour_timestamp) tuples.
+    
+    Args:
+        db_conn: Database connection
+        weather_address: Weather address to check
+        time_ranges: List of (start_datetime, end_datetime) tuples to check
+    """
+    missing_hours = []
+    
+    with db_conn.cursor() as cur:
+        for start_datetime_local, end_datetime_local in time_ranges:
+            # Check for missing daily data first
+            current_date = start_datetime_local.date()
+            end_date = end_datetime_local.date()
+            
+            missing_dates = []
+            while current_date <= end_date:
+                cur.execute("""
+                    SELECT COUNT(*) FROM weather.weather_data 
+                    WHERE address = %s AND date = %s
+                """, (weather_address, current_date))
+                
+                count = cur.fetchone()[0]
+                if count == 0:
+                    missing_dates.append(current_date)
+                
+                current_date += timedelta(days=1)
+            
+            # For missing daily data, add all hours in the expected range for those dates
+            for missing_date in missing_dates:
+                # Get timezone from the datetime object
+                local_tz = start_datetime_local.tzinfo
+                date_start = datetime.combine(missing_date, datetime.min.time())
+                date_start_local = local_tz.localize(date_start)
+                
+                # Find the overlap between this date and our target range
+                day_start = max(date_start_local, start_datetime_local)
+                day_end = min(date_start_local + timedelta(days=1), end_datetime_local + timedelta(hours=1))
+                
+                if day_start < day_end:
+                    # Generate missing hours for this date
+                    current_hour = day_start.replace(minute=0, second=0, microsecond=0)
+                    while current_hour < day_end:
+                        missing_hours.append((weather_address, current_hour))
+                        current_hour += timedelta(hours=1)
+            
+            # Check for missing hourly data in the specified time range for dates that have daily data
+            cur.execute("""
+                SELECT w.id, w.date 
+                FROM weather.weather_data w
+                WHERE w.address = %s 
+                AND w.date >= %s 
+                AND w.date <= %s
+                ORDER BY w.date
+            """, (weather_address, start_datetime_local.date(), end_datetime_local.date()))
+            
+            weather_data_records = cur.fetchall()
+            
+            for weather_data_id, date in weather_data_records:
+                # Skip dates that we already identified as completely missing
+                if date in missing_dates:
+                    continue
+                    
+                # Get timezone from the datetime object
+                local_tz = start_datetime_local.tzinfo
+                # Generate expected hours for this date within our time range
+                date_start = datetime.combine(date, datetime.min.time())
+                date_start_local = local_tz.localize(date_start)
+                
+                # Find the overlap between this date and our target range
+                day_start = max(date_start_local, start_datetime_local)
+                day_end = min(date_start_local + timedelta(days=1), end_datetime_local + timedelta(hours=1))
+                
+                if day_start >= day_end:
+                    continue  # No overlap
+                
+                # Generate expected hours
+                current_hour = day_start.replace(minute=0, second=0, microsecond=0)
+                while current_hour < day_end:
+                    # Check if this hour exists in hourly_data
+                    # Convert timezone-aware datetime to naive for database comparison
+                    naive_hour = current_hour.replace(tzinfo=None)
+                    cur.execute("""
+                        SELECT COUNT(*) FROM weather.hourly_data 
+                        WHERE weather_data_id = %s AND hour = %s
+                    """, (weather_data_id, naive_hour))
+                    
+                    count = cur.fetchone()[0]
+                    if count == 0:
+                        missing_hours.append((weather_address, current_hour))
+                    
+                    current_hour += timedelta(hours=1)
+    
+    return missing_hours
+
+
+def collect_missing_hours_by_address_optimized(db_conn, address, include_inactive=False):
+    """
+    Collect missing hours for a specific address using optimized time range merging.
+    
+    This function:
+    1. Collects time ranges from all display groups for the address
+    2. Merges overlapping time ranges to minimize redundant checks
+    3. Checks for missing hours only within the merged ranges
+    
+    Args:
+        db_conn: Database connection
+        address: Weather address to check
+        include_inactive: If False (default), only consider active display groups.
+                         If True, consider all display groups regardless of active status.
+    
+    Returns:
+        Tuple of (display_group_ranges, merged_ranges, missing_hours) where:
+        - display_group_ranges: Dict mapping display_group_id to its time range
+        - merged_ranges: List of merged (start, end) time ranges
+        - missing_hours: List of missing hour timestamps
+    """
+    # Get all display group IDs for this address
+    with db_conn.cursor() as cur:
+        if include_inactive:
+            cur.execute("""
+                SELECT display_group_id 
+                FROM display_group 
+                WHERE weather_address = %s
+                AND (is_removed = false OR is_removed IS NULL)
+                ORDER BY display_group_id
+            """, (address,))
+        else:
+            cur.execute("""
+                SELECT display_group_id 
+                FROM display_group 
+                WHERE weather_address = %s
+                AND active = true
+                AND (is_removed = false OR is_removed IS NULL)
+                ORDER BY display_group_id
+            """, (address,))
+        display_group_ids = [row[0] for row in cur.fetchall()]
+    
+    print(f"\nProcessing address: {address}")
+    print(f"Found {len(display_group_ids)} {'display groups' if include_inactive else 'active display groups'} for this address")
+    
+    # Collect time ranges from all display groups
+    display_group_ranges = {}
+    all_time_ranges = []
+    
+    for display_group_id in display_group_ids:
+        result = get_display_group_time_range(db_conn, display_group_id)
+        if result:
+            weather_address, start_datetime, end_datetime, tz_name = result
+            display_group_ranges[display_group_id] = (start_datetime, end_datetime)
+            all_time_ranges.append((start_datetime, end_datetime))
+            print(f"  Display group {display_group_id}: {start_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    if not all_time_ranges:
+        print("  No valid time ranges found for this address")
+        return {}, [], []
+    
+    # Merge overlapping time ranges
+    merged_ranges = merge_overlapping_time_ranges(all_time_ranges)
+    
+    print(f"\nOptimized time ranges (merged from {len(all_time_ranges)} to {len(merged_ranges)} ranges):")
+    for start, end in merged_ranges:
+        print(f"  {start.strftime('%Y-%m-%d %H:%M:%S %Z')} to {end.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    # Check for missing hours only within the merged ranges
+    print(f"\nChecking for missing hours within {len(merged_ranges)} merged time ranges...")
+    missing_hours_tuples = check_missing_hours_for_time_ranges(db_conn, address, merged_ranges)
+    
+    # Extract just the timestamps from the tuples
+    missing_hours = [timestamp for _, timestamp in missing_hours_tuples]
+    
+    return display_group_ranges, merged_ranges, missing_hours
+
+
 def merge_time_ranges(timestamps):
     """
     Merge consecutive and overlapping timestamps into consolidated ranges.
@@ -1447,7 +1707,7 @@ def main():
             db_conn.close()
         return
 
-    # Handle --fetch-missing-hours-for-address option
+    # Handle --fetch-missing-hours-for-address option with optimization
     if args.fetch_missing_hours_for_address:
         if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report:
             print("Error: --fetch-missing-hours-for-address cannot be used with other main operation options.")
@@ -1464,18 +1724,47 @@ def main():
             target_address = args.fetch_missing_hours_for_address
             print(f"Finding and fetching missing hourly weather data for address: {target_address}")
             
-            # Collect missing hours for all addresses
-            addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=args.include_inactive)
+            # Use the optimized function that merges overlapping time ranges
+            display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
+                db_conn, target_address, include_inactive=args.include_inactive)
             
-            # Filter to only the requested address
-            if target_address not in addresses_with_ranges:
+            if not missing_hours:
                 print(f"\nNo missing hourly weather data found for address: {target_address}")
                 return
             
-            filtered_addresses = {target_address: addresses_with_ranges[target_address]}
+            # Convert missing hours to date ranges
+            dates_needed = set()
+            for timestamp in missing_hours:
+                dates_needed.add(timestamp.date())
+            
+            # Convert to sorted list of date strings
+            sorted_dates = sorted(dates_needed)
+            
+            # Merge consecutive dates into ranges
+            date_ranges = []
+            if sorted_dates:
+                range_start = sorted_dates[0]
+                range_end = sorted_dates[0]
+                
+                for i in range(1, len(sorted_dates)):
+                    current_date = sorted_dates[i]
+                    
+                    # Check if current date is consecutive
+                    if current_date == range_end + timedelta(days=1):
+                        # Extend the current range
+                        range_end = current_date
+                    else:
+                        # Gap found, close current range and start a new one
+                        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
+                        range_start = current_date
+                        range_end = current_date
+                
+                # Add the final range
+                date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
             
             # Fetch the missing hours
-            fetch_missing_hours_for_addresses(db_conn, api_key, filtered_addresses, 
+            addresses_with_ranges = {target_address: date_ranges}
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
                                             dry_run=args.dry_run, 
                                             max_days_per_request=args.max_days_per_request)
         finally:
