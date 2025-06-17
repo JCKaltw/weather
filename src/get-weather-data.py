@@ -1659,8 +1659,6 @@ def main():
                         help="Find and fetch all missing hourly weather data for active display groups")
     parser.add_argument("--fetch-missing-hours-for-address", type=str,
                         help="Fetch missing hourly weather data for a specific address")
-    parser.add_argument("--fetch-missing-hours-for-dirty-addresses", action='store_true',
-                        help="Fetch missing hourly weather data for all addresses marked as dirty, then mark them clean")
     parser.add_argument("--fetch-from-report", type=str,
                         help="Fetch missing hours based on a previously generated JSON report file")
     parser.add_argument("--max-days-per-request", type=int, default=None,
@@ -1678,7 +1676,7 @@ def main():
 
     # Handle --fetch-missing-hours option
     if args.fetch_missing_hours:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours_for_address or args.fetch_from_report or args.fetch_missing_hours_for_dirty_addresses:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours_for_address or args.fetch_from_report:
             print("Error: --fetch-missing-hours cannot be used with other main operation options.")
             return
         
@@ -1709,161 +1707,9 @@ def main():
             db_conn.close()
         return
 
-def fetch_missing_hours_for_single_address(db_conn, api_key, target_address, include_inactive=False, dry_run=False, max_days_per_request=None):
-    """
-    Fetch missing hourly weather data for a single address.
-    This is the core function used by --fetch-missing-hours-for-address.
-    
-    Args:
-        db_conn: Database connection
-        api_key: Visual Crossing API key
-        target_address: Weather address to process
-        include_inactive: If False (default), only consider active display groups
-        dry_run: If True, show what would be done without executing
-        max_days_per_request: Maximum days to fetch in a single request
-        
-    Returns:
-        True if any missing hours were found and processed, False otherwise
-    """
-    print(f"Finding and fetching missing hourly weather data for address: {target_address}")
-    
-    # Use the optimized function that merges overlapping time ranges
-    display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
-        db_conn, target_address, include_inactive=include_inactive)
-    
-    if not missing_hours:
-        print(f"\nNo missing hourly weather data found for address: {target_address}")
-        return False
-    
-    # Convert missing hours to date ranges
-    dates_needed = set()
-    for timestamp in missing_hours:
-        dates_needed.add(timestamp.date())
-    
-    # Convert to sorted list of date strings
-    sorted_dates = sorted(dates_needed)
-    
-    # Merge consecutive dates into ranges
-    date_ranges = []
-    if sorted_dates:
-        range_start = sorted_dates[0]
-        range_end = sorted_dates[0]
-        
-        for i in range(1, len(sorted_dates)):
-            current_date = sorted_dates[i]
-            
-            # Check if current date is consecutive
-            if current_date == range_end + timedelta(days=1):
-                # Extend the current range
-                range_end = current_date
-            else:
-                # Gap found, close current range and start a new one
-                date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-                range_start = current_date
-                range_end = current_date
-        
-        # Add the final range
-        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-    
-    # Fetch the missing hours
-    addresses_with_ranges = {target_address: date_ranges}
-    fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
-                                    dry_run=dry_run, 
-                                    max_days_per_request=max_days_per_request)
-    return True
-
-
-def fetch_missing_hours_for_single_address(db_conn, api_key, target_address, include_inactive=False, dry_run=False, max_days_per_request=None):
-    """
-    Fetch missing hourly weather data for a single address.
-    This is the core function used by --fetch-missing-hours-for-address.
-    
-    Args:
-        db_conn: Database connection
-        api_key: Visual Crossing API key
-        target_address: Weather address to process
-        include_inactive: If False (default), only consider active display groups
-        dry_run: If True, show what would be done without executing
-        max_days_per_request: Maximum days to fetch in a single request
-        
-    Returns:
-        True if any missing hours were found and processed, False otherwise
-    """
-    print(f"Finding and fetching missing hourly weather data for address: {target_address}")
-    
-    # Use the optimized function that merges overlapping time ranges
-    display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
-        db_conn, target_address, include_inactive=include_inactive)
-    
-    if not missing_hours:
-        print(f"\nNo missing hourly weather data found for address: {target_address}")
-        return False
-    
-    # Convert missing hours to date ranges
-    dates_needed = set()
-    for timestamp in missing_hours:
-        dates_needed.add(timestamp.date())
-    
-    # Convert to sorted list of date strings
-    sorted_dates = sorted(dates_needed)
-    
-    # Merge consecutive dates into ranges
-    date_ranges = []
-    if sorted_dates:
-        range_start = sorted_dates[0]
-        range_end = sorted_dates[0]
-        
-        for i in range(1, len(sorted_dates)):
-            current_date = sorted_dates[i]
-            
-            # Check if current date is consecutive
-            if current_date == range_end + timedelta(days=1):
-                # Extend the current range
-                range_end = current_date
-            else:
-                # Gap found, close current range and start a new one
-                date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-                range_start = current_date
-                range_end = current_date
-        
-        # Add the final range
-        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-    
-    # Fetch the missing hours
-    addresses_with_ranges = {target_address: date_ranges}
-    fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
-                                    dry_run=dry_run, 
-                                    max_days_per_request=max_days_per_request)
-    return True
-
-
-def get_dirty_weather_addresses(db_conn):
-    """
-    Retrieve all weather addresses where dirty = true.
-    Returns a list of address strings.
-    """
-    with db_conn.cursor() as cur:
-        cur.execute("SELECT address FROM weather.weather_location WHERE dirty = true ORDER BY address")
-        addresses = [row[0] for row in cur.fetchall()]
-    return addresses
-
-
-def mark_address_clean(db_conn, address):
-    """
-    Mark a weather address as clean (dirty = false).
-    
-    Args:
-        db_conn: Database connection
-        address: Weather address to mark as clean
-    """
-    with db_conn.cursor() as cur:
-        cur.execute("UPDATE weather.weather_location SET dirty = false WHERE address = %s", (address,))
-        db_conn.commit()
-
-
     # Handle --fetch-missing-hours-for-address option with optimization
     if args.fetch_missing_hours_for_address:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report or args.fetch_missing_hours_for_dirty_addresses:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report:
             print("Error: --fetch-missing-hours-for-address cannot be used with other main operation options.")
             return
         
@@ -1876,107 +1722,58 @@ def mark_address_clean(db_conn, address):
         
         try:
             target_address = args.fetch_missing_hours_for_address
-            fetch_missing_hours_for_single_address(
-                db_conn, api_key, target_address, 
-                include_inactive=args.include_inactive,
-                dry_run=args.dry_run,
-                max_days_per_request=args.max_days_per_request
-            )
-        finally:
-            db_conn.close()
-        return
-
-    # Handle --fetch-missing-hours-for-dirty-addresses option
-    if args.fetch_missing_hours_for_dirty_addresses:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report or args.fetch_missing_hours_for_address:
-            print("Error: --fetch-missing-hours-for-dirty-addresses cannot be used with other main operation options.")
-            return
-        
-        db_conn = psycopg2.connect(
-            host=os.environ['PGHOST_2'],
-            user=os.environ['PGUSER_2'],
-            dbname=os.environ['PGDATABASE_2'],
-            port=os.environ['PGPORT_2']
-        )
-        
-        try:
-            # Get all dirty addresses
-            dirty_addresses = get_dirty_weather_addresses(db_conn)
+            print(f"Finding and fetching missing hourly weather data for address: {target_address}")
             
-            if not dirty_addresses:
-                print("No dirty weather addresses found.")
+            # Use the optimized function that merges overlapping time ranges
+            display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
+                db_conn, target_address, include_inactive=args.include_inactive)
+            
+            if not missing_hours:
+                print(f"\nNo missing hourly weather data found for address: {target_address}")
                 return
             
-            print(f"Found {len(dirty_addresses)} dirty weather addresses to process.")
+            # Convert missing hours to date ranges
+            dates_needed = set()
+            for timestamp in missing_hours:
+                dates_needed.add(timestamp.date())
             
-            # Process each dirty address
-            for i, address in enumerate(dirty_addresses, 1):
-                print(f"\n[{i}/{len(dirty_addresses)}] Processing dirty address: {address}")
-                print("="*80)
-                
-                # Fetch missing hours for this address
-                found_missing = fetch_missing_hours_for_single_address(
-                    db_conn, api_key, address, 
-                    include_inactive=args.include_inactive,
-                    dry_run=args.dry_run,
-                    max_days_per_request=args.max_days_per_request
-                )
-                
-                # Mark address as clean after processing (even if no missing hours were found)
-                if not args.dry_run:
-                    mark_address_clean(db_conn, address)
-                    print(f"\nMarked address as clean: {address}")
-                else:
-                    print(f"\n[DRY RUN] Would mark address as clean: {address}")
-                
-            print(f"\n{'='*80}")
-            print(f"Completed processing {len(dirty_addresses)} dirty addresses.")
-            if not args.dry_run:
-                print("All processed addresses have been marked as clean.")
-                
-        finally:
-            db_conn.close()
-        return# Get all dirty addresses
-            dirty_addresses = get_dirty_weather_addresses(db_conn)
+            # Convert to sorted list of date strings
+            sorted_dates = sorted(dates_needed)
             
-            if not dirty_addresses:
-                print("No dirty weather addresses found.")
-                return
+            # Merge consecutive dates into ranges
+            date_ranges = []
+            if sorted_dates:
+                range_start = sorted_dates[0]
+                range_end = sorted_dates[0]
+                
+                for i in range(1, len(sorted_dates)):
+                    current_date = sorted_dates[i]
+                    
+                    # Check if current date is consecutive
+                    if current_date == range_end + timedelta(days=1):
+                        # Extend the current range
+                        range_end = current_date
+                    else:
+                        # Gap found, close current range and start a new one
+                        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
+                        range_start = current_date
+                        range_end = current_date
+                
+                # Add the final range
+                date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
             
-            print(f"Found {len(dirty_addresses)} dirty weather addresses to process.")
-            
-            # Process each dirty address
-            for i, address in enumerate(dirty_addresses, 1):
-                print(f"\n[{i}/{len(dirty_addresses)}] Processing dirty address: {address}")
-                print("="*80)
-                
-                # Fetch missing hours for this address
-                found_missing = fetch_missing_hours_for_single_address(
-                    db_conn, api_key, address, 
-                    include_inactive=args.include_inactive,
-                    dry_run=args.dry_run,
-                    max_days_per_request=args.max_days_per_request
-                )
-                
-                # Mark address as clean after processing (even if no missing hours were found)
-                if not args.dry_run:
-                    mark_address_clean(db_conn, address)
-                    print(f"\nMarked address as clean: {address}")
-                else:
-                    print(f"\n[DRY RUN] Would mark address as clean: {address}")
-                
-            print(f"\n{'='*80}")
-            print(f"Completed processing {len(dirty_addresses)} dirty addresses.")
-            if not args.dry_run:
-                print("All processed addresses have been marked as clean.")
-                
+            # Fetch the missing hours
+            addresses_with_ranges = {target_address: date_ranges}
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
         finally:
             db_conn.close()
         return
 
     # Handle --fetch-from-report option
     if args.fetch_from_report:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_missing_hours_for_dirty_addresses:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_missing_hours_for_address:
             print("Error: --fetch-from-report cannot be used with other main operation options.")
             return
         
@@ -2045,7 +1842,7 @@ def mark_address_clean(db_conn, address):
 
     # Handle the new --report-missing-hours-by-address option
     if args.report_missing_hours_by_address:
-        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report or args.fetch_missing_hours_for_dirty_addresses:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
             print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json and --include-inactive.")
             return
         
@@ -2133,7 +1930,7 @@ def mark_address_clean(db_conn, address):
 
     # Existing functionality - require address for all other operations
     if not args.address:
-        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --fetch-missing-hours, --fetch-missing-hours-for-address, --fetch-missing-hours-for-dirty-addresses, or --fetch-from-report.")
+        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --fetch-missing-hours, --fetch-missing-hours-for-address, or --fetch-from-report.")
         return
 
     # Calculate yesterday's date based on the time zone offset
