@@ -11,8 +11,7 @@
 # The following tables are expected to exist in the database:
 #
 # CREATE TABLE weather.weather_location (
-#     address VARCHAR(255) PRIMARY KEY,
-#     dirty BOOLEAN DEFAULT FALSE
+#     address VARCHAR(255) PRIMARY KEY
 # );
 #
 # CREATE TABLE weather.weather_data (
@@ -348,40 +347,6 @@ def get_active_weather_addresses(db_conn, include_inactive=False):
 
     return sorted(list(active_addresses))
 #---------- END NEW ------
-
-def get_dirty_weather_addresses(db_conn):
-    """
-    Retrieve all weather addresses that are marked as dirty.
-    
-    Returns a list of weather addresses where dirty = true.
-    """
-    with db_conn.cursor() as cur:
-        cur.execute("""
-            SELECT address 
-            FROM weather.weather_location 
-            WHERE dirty = true
-            ORDER BY address
-        """)
-        addresses = [row[0] for row in cur.fetchall()]
-    return addresses
-
-
-def mark_address_as_clean(db_conn, address):
-    """
-    Mark a weather address as clean (dirty = false).
-    
-    Args:
-        db_conn: Database connection
-        address: Weather address to mark as clean
-    """
-    with db_conn.cursor() as cur:
-        cur.execute("""
-            UPDATE weather.weather_location 
-            SET dirty = false 
-            WHERE address = %s
-        """, (address,))
-        db_conn.commit()
-
 
 def check_missing_hours_for_display_group(db_conn, display_group_id):
     """
@@ -1089,10 +1054,7 @@ def process_active_locations(api_key, include_hourly=False, dry_run=False, inclu
                 print(f"Weather data for {address} processed successfully.")
 
     finally:
-                    db_conn.close()
-
-if __name__ == "__main__":
-    main()
+        db_conn.close()
 
 #----- END NEW -------
 
@@ -1401,103 +1363,361 @@ def update_for_display_group_id(db_conn, display_group_id, api_key, dry_run=Fals
             print("No missing hourly data found in the specified range.")
 
 
-def fetch_missing_hours_for_single_address(db_conn, api_key, target_address, 
-                                         dry_run=False, max_days_per_request=None, 
-                                         include_inactive=False, mark_clean=True):
-    """
-    Fetch missing hourly weather data for a single address.
-    This is a refactored version of the --fetch-missing-hours-for-address logic.
-    
-    Args:
-        db_conn: Database connection
-        api_key: Visual Crossing API key
-        target_address: Address to fetch missing hours for
-        dry_run: If True, show what would be done without executing
-        max_days_per_request: Maximum days to fetch in a single request
-        include_inactive: Whether to include inactive display groups
-        mark_clean: If True, mark the address as clean after processing
-    
-    Returns:
-        Boolean indicating if any data was fetched
-    """
-    print(f"Finding and fetching missing hourly weather data for address: {target_address}")
-    
-    # Collect missing hours for all addresses
-    addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=include_inactive)
-    
-    # Filter to only the requested address
-    if target_address not in addresses_with_ranges:
-        print(f"  No missing hourly weather data found for address: {target_address}")
-        if mark_clean:
-            mark_address_as_clean(db_conn, target_address)
-            print(f"  Marked address as clean: {target_address}")
-        return False
-    
-    filtered_addresses = {target_address: addresses_with_ranges[target_address]}
-    
-    # Fetch the missing hours
-    fetch_missing_hours_for_addresses(db_conn, api_key, filtered_addresses, 
-                                    dry_run=dry_run, 
-                                    max_days_per_request=max_days_per_request)
-    
-    # Mark address as clean if requested and not in dry run mode
-    if mark_clean and not dry_run:
-        mark_address_as_clean(db_conn, target_address)
-        print(f"  Marked address as clean: {target_address}")
-    
-    return True
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start-date")
+    parser.add_argument("--end-date")
+    parser.add_argument("--address")
+    parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--dry-run", action='store_true',
+                        help="Perform a dry run that only shows the request and response in JSON format and the SQL queries")
+    parser.add_argument("--tzoffset", type=int,
+                        help="Time zone offset in hours (e.g., -7 for Scottsdale, AZ) - used only for single location operations")
+    parser.add_argument("--hourly", action='store_true',
+                        help="Fetch and insert hourly weather data")
+    parser.add_argument("--get-missing-hours", action='store_true',
+                        help="Fetch and update missing hourly data for the specified address")
+    parser.add_argument("--get-missing-tz", action='store_true',
+                        help="Fetch and populate missing tz values for the specified address")
+    parser.add_argument("--run-for-all-locations", action='store_true',
+                        help="Run weather data collection for all locations in the weather_location table, fetching the previous 24 hours of data using UTC-based date calculation")
+#------- BEGIN NEW --------
+    parser.add_argument("--run-for-active-locations", action='store_true',
+                        help="Run weather data collection for active locations only (those with display groups needing recent data), fetching the previous 24 hours of data using UTC-based date calculation")
+#------- END NEW --------
+    parser.add_argument("--update-for-display-group-id", type=int,
+                        help="Update missing hourly weather data for a specific display group ID")
+    parser.add_argument("--list-display-group-ids-missing-hours", action='store_true',
+                        help="Scan all display group IDs and list those with missing hourly weather data")
+    parser.add_argument("--report-missing-hours-by-address", action='store_true',
+                        help="Generate a comprehensive report of missing hourly weather data by address with consolidated time ranges")
+    parser.add_argument("--output-json", type=str,
+                        help="Output JSON file path for the missing hours report (use with --report-missing-hours-by-address)")
+    parser.add_argument("--include-inactive", action='store_true',
+                        help="Include inactive display groups in operations (default is to only process active display groups)")
+    parser.add_argument("--fetch-missing-hours", action='store_true',
+                        help="Find and fetch all missing hourly weather data for active display groups")
+    parser.add_argument("--fetch-missing-hours-for-address", type=str,
+                        help="Fetch missing hourly weather data for a specific address")
+    parser.add_argument("--fetch-from-report", type=str,
+                        help="Fetch missing hours based on a previously generated JSON report file")
+    parser.add_argument("--max-days-per-request", type=int, default=None,
+                        help="Maximum number of days to fetch in a single batch (default: no limit)")
+    args = parser.parse_args()
 
-
-def fetch_missing_hours_for_dirty_addresses(db_conn, api_key, dry_run=False, 
-                                           max_days_per_request=None, 
-                                           include_inactive=False):
-    """
-    Fetch missing hourly weather data for all addresses marked as dirty.
-    
-    Args:
-        db_conn: Database connection
-        api_key: Visual Crossing API key
-        dry_run: If True, show what would be done without executing
-        max_days_per_request: Maximum days to fetch in a single request
-        include_inactive: Whether to include inactive display groups
-    """
-    # Get all dirty addresses
-    dirty_addresses = get_dirty_weather_addresses(db_conn)
-    
-    if not dirty_addresses:
-        print("No dirty addresses found.")
+    api_key = read_api_key()
+    if not api_key:
         return
-    
-    print(f"Found {len(dirty_addresses)} dirty addresses to process.")
-    print("="*80)
-    
-    successful_count = 0
-    
-    # Process each dirty address
-    for i, address in enumerate(dirty_addresses, 1):
-        print(f"\n[{i}/{len(dirty_addresses)}] Processing dirty address: {address}")
-        print("-"*80)
+
+    # Validate --output-json usage
+    if args.output_json and not args.report_missing_hours_by_address:
+        print("Error: --output-json can only be used with --report-missing-hours-by-address.")
+        return
+
+    # Handle --fetch-missing-hours option
+    if args.fetch_missing_hours:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --fetch-missing-hours cannot be used with other main operation options.")
+            return
         
-        # Fetch missing hours for this address
-        data_fetched = fetch_missing_hours_for_single_address(
-            db_conn, api_key, address,
-            dry_run=dry_run,
-            max_days_per_request=max_days_per_request,
-            include_inactive=include_inactive,
-            mark_clean=True  # This will mark the address as clean after processing
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
         )
         
-        if data_fetched:
-            successful_count += 1
-    
-    # Summary
-    print("\n" + "="*80)
-    print("DIRTY ADDRESSES PROCESSING SUMMARY")
-    print("="*80)
-    print(f"Total dirty addresses processed: {len(dirty_addresses)}")
-    print(f"Addresses with data fetched: {successful_count}")
-    print(f"Addresses with no missing data: {len(dirty_addresses) - successful_count}")
-    if not dry_run:
-        print(f"All addresses marked as clean")
+        try:
+            print(f"Finding and fetching missing hourly weather data for {'all' if args.include_inactive else 'active'} display groups...")
+            
+            # Collect missing hours
+            addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=args.include_inactive)
+            
+            if not addresses_with_ranges:
+                print(f"\nNo missing hourly weather data found across {'all' if args.include_inactive else 'active'} display groups.")
+                return
+            
+            print(f"\nFound {len(addresses_with_ranges)} addresses with missing hours.")
+            
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle --fetch-missing-hours-for-address option
+    if args.fetch_missing_hours_for_address:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_from_report:
+            print("Error: --fetch-missing-hours-for-address cannot be used with other main operation options.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            target_address = args.fetch_missing_hours_for_address
+            print(f"Finding and fetching missing hourly weather data for address: {target_address}")
+            
+            # Collect missing hours for all addresses
+            addresses_with_ranges = collect_missing_hours_by_address(db_conn, include_inactive=args.include_inactive)
+            
+            # Filter to only the requested address
+            if target_address not in addresses_with_ranges:
+                print(f"\nNo missing hourly weather data found for address: {target_address}")
+                return
+            
+            filtered_addresses = {target_address: addresses_with_ranges[target_address]}
+            
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, filtered_addresses, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle --fetch-from-report option
+    if args.fetch_from_report:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.report_missing_hours_by_address or args.fetch_missing_hours or args.fetch_missing_hours_for_address:
+            print("Error: --fetch-from-report cannot be used with other main operation options.")
+            return
+        
+        # Read the JSON report file
+        try:
+            with open(args.fetch_from_report, 'r') as f:
+                report_data = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: Report file not found: {args.fetch_from_report}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in report file: {e}")
+            return
+        
+        # Extract addresses and date ranges from the report
+        if "missing_hours_by_address" not in report_data:
+            print("Error: Invalid report format - missing 'missing_hours_by_address' key")
+            return
+        
+        addresses_with_ranges = {}
+        
+        for address, address_data in report_data["missing_hours_by_address"].items():
+            if "missing_time_ranges" not in address_data:
+                continue
+            
+            # Extract date ranges from the report
+            date_ranges = []
+            for time_range in address_data["missing_time_ranges"]:
+                # Parse the ISO format timestamps
+                start_time = datetime.fromisoformat(time_range["start_time"].replace('+00:00', '+0000'))
+                end_time = datetime.fromisoformat(time_range["end_time"].replace('+00:00', '+0000'))
+                
+                # Convert to date strings
+                start_date = start_time.date().strftime("%Y-%m-%d")
+                end_date = end_time.date().strftime("%Y-%m-%d")
+                
+                # Add to ranges if not already present
+                if (start_date, end_date) not in date_ranges:
+                    date_ranges.append((start_date, end_date))
+            
+            if date_ranges:
+                addresses_with_ranges[address] = sorted(date_ranges)
+        
+        if not addresses_with_ranges:
+            print("No missing hours found in the report file.")
+            return
+        
+        print(f"Report generated: {report_data.get('report_generated', 'Unknown')}")
+        print(f"Found {len(addresses_with_ranges)} addresses with missing hours in the report.")
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            # Fetch the missing hours
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=args.dry_run, 
+                                            max_days_per_request=args.max_days_per_request)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle the new --report-missing-hours-by-address option
+    if args.report_missing_hours_by_address:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --report-missing-hours-by-address cannot be used with other options except --output-json and --include-inactive.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            report_missing_hours_by_address(db_conn, output_json_path=args.output_json, include_inactive=args.include_inactive)
+        finally:
+            db_conn.close()
+        return
+
+    # Handle the new --list-display-group-ids-missing-hours option
+    if args.list_display_group_ids_missing_hours:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.run_for_all_locations or args.update_for_display_group_id or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --list-display-group-ids-missing-hours cannot be used with other options except --include-inactive.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        
+        try:
+            missing_group_ids = list_display_group_ids_missing_hours(db_conn, include_inactive=args.include_inactive)
+            
+            print(f"\nSummary:")
+            print(f"Display groups with missing hourly weather data: {len(missing_group_ids)}")
+            
+            if missing_group_ids:
+                print("Display group IDs missing hours:")
+                for group_id in missing_group_ids:
+                    print(f"  {group_id}")
+            else:
+                print(f"All {'display groups' if args.include_inactive else 'active display groups'} have complete hourly weather data.")
+                
+        finally:
+            db_conn.close()
+        return
+
+#------- BEGIN NEW --------
+# Handle the new --run-for-active-locations option
+    if args.run_for_active_locations:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --run-for-active-locations cannot be used with other options except --include-inactive.")
+            return
+        
+        print(f"Running weather data collection for active locations{' (including inactive display groups)' if args.include_inactive else ''}...")
+        process_active_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run, include_inactive=args.include_inactive)
+        return
+#------- END NEW --------
+
+    # Handle the new --run-for-all-locations option
+    if args.run_for_all_locations:
+
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.update_for_display_group_id or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --run-for-all-locations cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, --run-for-active-locations, or the new fetch options.")
+            return
+        
+        print("Running weather data collection for all locations...")
+        process_all_locations(api_key, include_hourly=args.hourly, dry_run=args.dry_run)
+        return
+
+    # Handle the new --update-for-display-group-id option
+    if args.update_for_display_group_id:
+        if args.address or args.start_date or args.end_date or args.tzoffset or args.get_missing_hours or args.get_missing_tz or args.list_display_group_ids_missing_hours or args.report_missing_hours_by_address or args.output_json or args.run_for_all_locations or args.run_for_active_locations or args.fetch_missing_hours or args.fetch_missing_hours_for_address or args.fetch_from_report:
+            print("Error: --update-for-display-group-id cannot be used with --address, --start-date, --end-date, --tzoffset, --get-missing-hours, --get-missing-tz, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --output-json options, --run-for-all-locations, --run-for-active-locations, or the new fetch options.")
+            return
+        
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        update_for_display_group_id(db_conn, args.update_for_display_group_id, api_key, dry_run=args.dry_run)
+        db_conn.close()
+        return
+
+    # Existing functionality - require address for all other operations
+    if not args.address:
+        print("Error: --address is required when not using --run-for-all-locations, --run-for-active-locations, --update-for-display-group-id, --list-display-group-ids-missing-hours, --report-missing-hours-by-address, --fetch-missing-hours, --fetch-missing-hours-for-address, or --fetch-from-report.")
+        return
+
+    # Calculate yesterday's date based on the time zone offset
+    yesterday = calculate_yesterday(args.tzoffset)
+
+    if not args.start_date:
+        args.start_date = yesterday
+    if not args.end_date:
+        args.end_date = yesterday
+
+    # Ensure the address exists in weather_location table for single address operations
+    if not args.dry_run:
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        ensure_location_exists(db_conn, args.address)
+        db_conn.close()
+
+    if args.get_missing_tz:
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        get_missing_tz(db_conn, args.address, api_key, dry_run=args.dry_run)
+        db_conn.close()
+    elif args.get_missing_hours:
+        if args.start_date != yesterday or args.end_date != yesterday:
+            print(
+                "Error: --start-date and --end-date are not allowed when using --get-missing-hours.")
+            return
+
+        db_conn = psycopg2.connect(
+            host=os.environ['PGHOST_2'],
+            user=os.environ['PGUSER_2'],
+            dbname=os.environ['PGDATABASE_2'],
+            port=os.environ['PGPORT_2']
+        )
+        get_missing_hours(db_conn, args.address, api_key, dry_run=args.dry_run)
+        db_conn.close()
     else:
-        print("DRY RUN - No addresses were marked as clean")
+        weather_data = fetch_weather_data(
+            args.address, args.start_date, args.end_date, api_key, include_hourly=args.hourly)
+
+        if weather_data is None:
+            print("Failed to fetch weather data. Please check the API key and try again.")
+            return
+
+        if args.dry_run:
+            print(json.dumps({
+                'Request': {
+                    'address': args.address,
+                    'start_date': args.start_date,
+                    'end_date': args.end_date
+                },
+                'Response': weather_data
+            }, indent=4))
+            insert_weather_data(None, args.address, weather_data,
+                                include_hourly=args.hourly, dry_run=True)
+        elif args.debug:
+            print(json.dumps({'Request': {'address': args.address, 'start_date': args.start_date,
+                  'end_date': args.end_date}, 'Response': weather_data}, indent=4))
+        else:
+            db_conn = psycopg2.connect(
+                host=os.environ['PGHOST_2'],
+                user=os.environ['PGUSER_2'],
+                dbname=os.environ['PGDATABASE_2'],
+                port=os.environ['PGPORT_2']
+            )
+            insert_weather_data(db_conn, args.address,
+                                weather_data, include_hourly=args.hourly)
+            db_conn.close()
+
+if __name__ == "__main__":
+    main()
