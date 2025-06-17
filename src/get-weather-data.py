@@ -1039,7 +1039,8 @@ def fetch_missing_hours_for_single_address(db_conn, api_key, address, dry_run=Fa
     Shared function to fetch missing hourly weather data for a single address.
     
     This function uses optimized time range merging and can be used by multiple options.
-    At the end, it marks the address as clean (dirty = false).
+    At the end, it marks the address as clean (dirty = false) regardless of whether
+    missing hours were found, since the purpose is to check and update the address.
     
     Args:
         db_conn: Database connection
@@ -1051,61 +1052,67 @@ def fetch_missing_hours_for_single_address(db_conn, api_key, address, dry_run=Fa
                          If True, consider all display groups regardless of active status.
     
     Returns:
-        True if successful, False if no missing hours found or error occurred
+        True if processing was successful (regardless of whether missing hours were found)
+        False only if an error occurred during processing
     """
     print(f"Finding and fetching missing hourly weather data for address: {address}")
     
-    # Use the optimized function that merges overlapping time ranges
-    display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
-        db_conn, address, include_inactive=include_inactive)
-    
-    if not missing_hours:
-        print(f"\nNo missing hourly weather data found for address: {address}")
-        return False
-    
-    # Convert missing hours to date ranges
-    dates_needed = set()
-    for timestamp in missing_hours:
-        dates_needed.add(timestamp.date())
-    
-    # Convert to sorted list of date strings
-    sorted_dates = sorted(dates_needed)
-    
-    # Merge consecutive dates into ranges
-    date_ranges = []
-    if sorted_dates:
-        range_start = sorted_dates[0]
-        range_end = sorted_dates[0]
+    try:
+        # Use the optimized function that merges overlapping time ranges
+        display_group_ranges, merged_ranges, missing_hours = collect_missing_hours_by_address_optimized(
+            db_conn, address, include_inactive=include_inactive)
         
-        for i in range(1, len(sorted_dates)):
-            current_date = sorted_dates[i]
+        if not missing_hours:
+            print(f"\nNo missing hourly weather data found for address: {address}")
+        else:
+            # Convert missing hours to date ranges
+            dates_needed = set()
+            for timestamp in missing_hours:
+                dates_needed.add(timestamp.date())
             
-            # Check if current date is consecutive
-            if current_date == range_end + timedelta(days=1):
-                # Extend the current range
-                range_end = current_date
-            else:
-                # Gap found, close current range and start a new one
+            # Convert to sorted list of date strings
+            sorted_dates = sorted(dates_needed)
+            
+            # Merge consecutive dates into ranges
+            date_ranges = []
+            if sorted_dates:
+                range_start = sorted_dates[0]
+                range_end = sorted_dates[0]
+                
+                for i in range(1, len(sorted_dates)):
+                    current_date = sorted_dates[i]
+                    
+                    # Check if current date is consecutive
+                    if current_date == range_end + timedelta(days=1):
+                        # Extend the current range
+                        range_end = current_date
+                    else:
+                        # Gap found, close current range and start a new one
+                        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
+                        range_start = current_date
+                        range_end = current_date
+                
+                # Add the final range
                 date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-                range_start = current_date
-                range_end = current_date
+            
+            # Fetch the missing hours
+            addresses_with_ranges = {address: date_ranges}
+            fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
+                                            dry_run=dry_run, 
+                                            max_days_per_request=max_days_per_request)
         
-        # Add the final range
-        date_ranges.append((range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d")))
-    
-    # Fetch the missing hours
-    addresses_with_ranges = {address: date_ranges}
-    fetch_missing_hours_for_addresses(db_conn, api_key, addresses_with_ranges, 
-                                    dry_run=dry_run, 
-                                    max_days_per_request=max_days_per_request)
-    
-    # Mark the address as clean (dirty = false) if not in dry run mode
-    if not dry_run:
-        mark_address_clean(db_conn, address)
-    else:
-        print(f"[DRY RUN] Would mark address '{address}' as clean (dirty = false)")
-    
-    return True
+        # Always mark the address as clean (dirty = false) after processing, 
+        # regardless of whether missing hours were found
+        if not dry_run:
+            mark_address_clean(db_conn, address)
+        else:
+            print(f"[DRY RUN] Would mark address '{address}' as clean (dirty = false)")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error processing address {address}: {e}")
+        return False
 
 
 def collect_missing_hours_by_address(db_conn, include_inactive=False):
@@ -1512,12 +1519,7 @@ def process_dirty_locations(api_key, dry_run=False, max_days_per_request=None, i
             if success:
                 print(f"Successfully processed dirty location: {address}")
             else:
-                print(f"No missing hours found for dirty location: {address}")
-                # Still mark it clean if not in dry run mode
-                if not dry_run:
-                    mark_address_clean(db_conn, address)
-                else:
-                    print(f"[DRY RUN] Would mark address '{address}' as clean (dirty = false)")
+                print(f"Error occurred while processing dirty location: {address}")
         
         print(f"\nCompleted processing {len(dirty_locations)} dirty locations.")
                 
@@ -1897,8 +1899,10 @@ def main():
                 max_days_per_request=args.max_days_per_request, 
                 include_inactive=args.include_inactive)
             
-            if not success:
-                print(f"Completed processing for address: {target_address}")
+            if success:
+                print(f"Successfully completed processing for address: {target_address}")
+            else:
+                print(f"Error occurred while processing address: {target_address}")
         finally:
             db_conn.close()
         return
